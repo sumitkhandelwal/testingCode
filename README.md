@@ -167,3 +167,89 @@ class TradeStrategy:
             logger.exception(e)
             logger.error("[Trade Strategy] Exception found")
             return ORDER_ACTION_HOLD, 0
+
+##########################
+
+
+import unittest
+from tradestrategy import TradeStrategy
+
+class TestTradeStrategy(unittest.TestCase):
+    def setUp(self):
+        self.strategy = TradeStrategy()
+        # Mock config values for consistent testing
+        self.strategy.units_per_window = 100
+        self.strategy.remaining_units = 100
+        self.strategy.remaining_time = 600
+        self.strategy.attempts_left = 3
+
+    def test_initial_state(self):
+        self.assertEqual(self.strategy.remaining_units, 100)
+        self.assertEqual(self.strategy.remaining_time, 600)
+        self.assertEqual(self.strategy.attempts_left, 3)
+
+    def test_refresh_remaining_units(self):
+        self.strategy.refresh_remaining_units(30)
+        self.assertEqual(self.strategy.remaining_units, 70)
+        self.strategy.refresh_remaining_units(80)
+        self.assertEqual(self.strategy.remaining_units, 0)  # Should not go negative
+
+    def test_refresh_remaining_time(self):
+        self.strategy.refresh_remaining_time(100)
+        self.assertEqual(self.strategy.remaining_time, 500)
+
+    def test_predict_price_change_not_enough_data(self):
+        # Provide less data than sequence length
+        short_data = [100] * (self.strategy.stock_predictor.sequence_length - 1)
+        pred = self.strategy.predict_price_change(short_data)
+        self.assertEqual(pred, 0.0)
+
+    def test_make_trade_decision_hold_due_to_no_attempts(self):
+        self.strategy.attempts_left = 0
+        intraday_data = [100] * self.strategy.stock_predictor.sequence_length
+        current_data = {"current": 100}
+        action, units = self.strategy.make_trade_decision(intraday_data, current_data)
+        self.assertEqual(action, "hold")
+        self.assertEqual(units, 0)
+
+    def test_make_trade_decision_emergency_sell(self):
+        self.strategy.remaining_time = 10
+        self.strategy.remaining_units = 50
+        self.strategy.attempts_left = 2
+        intraday_data = [100] * self.strategy.stock_predictor.sequence_length
+        current_data = {"current": 100}
+        action, units = self.strategy.make_trade_decision(intraday_data, current_data)
+        self.assertEqual(action, "sell")
+        self.assertEqual(units, 50)
+        self.assertEqual(self.strategy.remaining_units, 0)
+        self.assertEqual(self.strategy.attempts_left, 1)
+
+    def test_make_trade_decision_sell_on_positive_prediction(self):
+        # Patch predict_price_change to return positive value
+        self.strategy.predict_price_change = lambda x: 0.05
+        self.strategy.remaining_units = 100
+        self.strategy.attempts_left = 3
+        intraday_data = [100] * self.strategy.stock_predictor.sequence_length
+        current_data = {"current": 100}
+        action, units = self.strategy.make_trade_decision(intraday_data, current_data)
+        self.assertEqual(action, "sell")
+        self.assertEqual(units, 100)
+        self.assertEqual(self.strategy.remaining_units, 0)
+        self.assertEqual(self.strategy.attempts_left, 2)
+
+    def test_make_trade_decision_hold_on_negative_prediction(self):
+        # Patch predict_price_change to return negative value
+        self.strategy.predict_price_change = lambda x: -0.05
+        self.strategy.remaining_units = 100
+        self.strategy.attempts_left = 3
+        intraday_data = [100] * self.strategy.stock_predictor.sequence_length
+        current_data = {"current": 100}
+        action, units = self.strategy.make_trade_decision(intraday_data, current_data)
+        self.assertEqual(action, "hold")
+        self.assertEqual(units, 0)
+        self.assertEqual(self.strategy.remaining_units, 100)
+        self.assertEqual(self.strategy.attempts_left, 3)
+
+if __name__ == "__main__":
+    unittest.main()
+
