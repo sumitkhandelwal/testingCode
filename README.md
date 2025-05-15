@@ -1,110 +1,65 @@
 import math
-from common_util import get_logger, read_config
-
-logger = get_logger(__name__)
-
-from sklearn.linear_model import LinearRegression
-import numpy as np
+import time
 
 class TradeStrategy:
-    """Encapsulates trading strategy logic with regression model."""
-
-    def __init__(self):
-        self.current_price = -1
-        self.config_data = read_config()
-        self.remaining_units = int(self.config_data.get('units_per_round', 100))
-        self.remaining_time = int(self.config_data.get('order_round_timeout', 600))  # 10 minutes
-        self.price_history = []
-        self.last_trade_price = None
-        self.profit_threshold = 0.002  # 0.2% profit threshold
-        self.stop_loss = -0.001  # 0.1% stop loss
-        self.min_trade_interval = 30  # Minimum seconds between trades
-        self.last_trade_time = 0
-        self.model = LinearRegression()
-        self.training_data = []
-        self.training_targets = []
-        self.is_trained = False
-
-    def refresh_remaining_units(self, sold_units):
-        self.remaining_units -= sold_units
-
-    def refresh_remaining_time(self, passed_seconds):
-        self.remaining_time = int(int(self.config_data.get('order_round_timeout', 300)) - passed_seconds)
-        logger.info(f"Remaining Time: {self.remaining_time} seconds")
-
-    def update_training_data(self, features, target):
-        self.training_data.append(features)
-        self.training_targets.append(target)
-        if len(self.training_data) > 50 and not self.is_trained:
-            self.train_model()
-
-    def train_model(self):
-        X = np.array(self.training_data)
-        y = np.array(self.training_targets)
-        self.model.fit(X, y)
-        self.is_trained = True
-        logger.info("Regression model trained with collected data")
-
-    def predict_price_change(self, features):
-        if not self.is_trained:
-            return 0.0
-        X = np.array(features).reshape(1, -1)
-        prediction = self.model.predict(X)[0]
-        return prediction
+    # … your __init__, refresh_remaining_units, refresh_remaining_time, etc. …
 
     def make_trade_decision(self, intraday_data, current_data):
         ORDER_ACTION_SELL = "sell"
         ORDER_ACTION_HOLD = "hold"
 
+
         try:
+            # ---- 1) PACE: TWAP buckets based on remaining time ----
+            # slice interval in seconds (default 60s)
+            slice_interval = int(self.config_data.get('slice_interval', 60))
+            # ensure we have a positive remaining_time
+            remaining_secs = max(1, self.remaining_time)
+            # how many buckets left (at least 1 so we finish)
+            buckets_left = math.ceil(remaining_secs / slice_interval)
+            # TWAP: how many units we “should” sell each bucket
+            per_bucket = math.ceil(self.remaining_units / buckets_left)
+
+            # ---- 2) OPPORTUNISTIC: compute a “good‐price” threshold ----
+            prices = intraday_data
+            mean_price = sum(prices) / len(prices)
+            hi = max(prices)
+            lo = min(prices)
+            thresh = mean_price + (hi - lo) / 2.0
+
             current_price = float(current_data["current"])
-            current_time = current_data.get("time", 0)
-            self.price_history.append(current_price)
-            
-            # Keep only last 30 price points
-            if len(self.price_history) > 30:
-                self.price_history = self.price_history[-30:]
+            units_to_sell = 0
+            action = ORDER_ACTION_HOLD
 
-            logger.info(f"Remaining Units: {self.remaining_units}, Time: {self.remaining_time}s")
+            # ---- 3) Early fill if price ≥ threshold ----
+            if current_price >= thresh and self.remaining_units > 0:
+                units_to_sell = min(self.remaining_units, per_bucket)
+                action = ORDER_ACTION_SELL
+                logger.info(
+                    f"[Strategy] Opportunistic SELL {units_to_sell} @ {current_price:.2f}"
+                )
 
-            # Prepare features for regression: e.g., last 5 price changes
-            if len(self.price_history) < 6:
-                features = [0]*5
+            # ---- 4) Otherwise, catch‐up slice ----
+            elif self.remaining_units > 0 and per_bucket > 0:
+                # if we’re in the last bucket, backstop fill all
+                if remaining_secs <= slice_interval:
+                    units_to_sell = self.remaining_units
+                    logger.info(
+                        f"[Strategy] Final‐minute backstop SELL {units_to_sell}"
+                    )
+                else:
+                    units_to_sell = per_bucket
+                    logger.info(
+                        f"[Strategy] Sliced SELL {units_to_sell} to keep on TWAP pace"
+                    )
+                action = ORDER_ACTION_SELL
+
             else:
-                features = [ (self.price_history[-i] - self.price_history[-i-1])/self.price_history[-i-1] for i in range(1,6)]
+                logger.info("[Strategy] HOLD — nothing to do")
 
-            # Update training data with last known price change (if available)
-            if len(self.price_history) > 6:
-                target = (self.price_history[-1] - self.price_history[-2]) / self.price_history[-2]
-                self.update_training_data(features, target)
-
-            prediction = self.predict_price_change(features)
-            logger.info(f"Predicted price change: {prediction}")
-
-            # Initialize last_trade_price if not set
-            if self.last_trade_price is None:
-                self.last_trade_price = current_price
-                return ORDER_ACTION_HOLD, 0
-
-            # Decision based on regression prediction and thresholds
-            if prediction > self.profit_threshold and self.remaining_units > 0:
-                trade_size = min(math.ceil(self.remaining_units * 0.5), self.remaining_units)
-                self.last_trade_price = current_price
-                self.last_trade_time = current_time
-                logger.info("[Trade Strategy] Regression model suggests SELL")
-                return ORDER_ACTION_SELL, trade_size
-            elif prediction < self.stop_loss:
-                trade_size = min(math.ceil(self.remaining_units * 0.5), self.remaining_units)
-                self.last_trade_price = current_price
-                self.last_trade_time = current_time
-                logger.info("[Trade Strategy] Regression model suggests STOP LOSS SELL")
-                return ORDER_ACTION_SELL, trade_size
-            else:
-                logger.info("[Trade Strategy] Hold position")
-                return ORDER_ACTION_HOLD, 0
+            return action, units_to_sell
 
         except Exception as e:
             logger.exception(e)
-            logger.error(f"[Trade Strategy] Exception found")
-
-        return ORDER_ACTION_HOLD, 0
+            logger.error("[Strategy] Exception in make_trade_decision")
+            return ORDER_ACTION_HOLD, 0
