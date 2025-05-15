@@ -1,432 +1,172 @@
-import pandas as pd
+import math
+import numpy as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.feature_selection import SelectFromModel
-from sklearn.model_selection import GridSearchCV
-import matplotlib.pyplot as plt
-import logging
-import joblib
-import os
-from datetime import datetime
+from common_util import get_logger, read_config
+from stock_prediction_v2 import StockPredictor
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
-class StockPredictor:
-    def __init__(self, model_path="stock_model.joblib", sequence_length=60):
-        """
-        Initialize the Stock Predictor with model parameters.
-        
-        Args:
-            model_path (str): Path to save/load the model
-            sequence_length (int): Number of time steps to look back for prediction
-        """
-        self.model_path = model_path
-        self.sequence_length = sequence_length
-        self.scaler = MinMaxScaler()
-        self.model = None
-        self.feature_cols = ['current', 'turnover', 'high', 'low', 'change', 'percent']
-        self.target_col = 'change'
-        
-    def load_data(self, filepath):
-        """
-        Load and prepare stock data from CSV.
-        
-        Args:
-            filepath (str): Path to the CSV file
-            
-        Returns:
-            pandas.DataFrame: Processed dataframe
-        """
-        try:
-            # Load data
-            df = pd.read_csv(filepath)
-            
-            # Convert numeric columns, replacing any non-numeric values with NaN
-            numeric_cols = ['current', 'turnover', 'high', 'low', 'change', 'percent']
-            for col in numeric_cols:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            # Drop rows with null values
-            df.dropna(subset=numeric_cols, inplace=True)
-            
-            # Convert datetime
-            df['datetime'] = pd.to_datetime(df['date'] + ' ' + df['time'])
-            df = df.sort_values('datetime')
-            
-            logger.info(f"Loaded data from {filepath} with shape {df.shape}")
-            return df
-        except Exception as e:
-            logger.error(f"Error loading data: {str(e)}")
-            raise
-            
-    def add_advanced_technical_indicators(self, df):
-        """Add technical indicators as features."""
-        # Basic indicators
-        df['MA5'] = df['current'].rolling(window=5).mean()
-        df['MA20'] = df['current'].rolling(window=20).mean()
-        df['MA50'] = df['current'].rolling(window=50).mean()
-        
-        # Exponential Moving Averages
-        df['EMA12'] = df['current'].ewm(span=12).mean()
-        df['EMA26'] = df['current'].ewm(span=26).mean()
-        
-        # RSI with different periods
-        for period in [9, 14, 21]:
-            delta = df['current'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-            rs = gain / loss
-            df[f'RSI_{period}'] = 100 - (100 / (1 + rs))
-        
-        # MACD and variations
-        df['MACD'] = df['EMA12'] - df['EMA26']
-        df['Signal_Line'] = df['MACD'].ewm(span=9).mean()
-        df['MACD_Hist'] = df['MACD'] - df['Signal_Line']
-        
-        # Bollinger Bands with different periods
-        for period in [20, 50]:
-            df[f'BB_middle_{period}'] = df['current'].rolling(window=period).mean()
-            std = df['current'].rolling(window=period).std()
-            df[f'BB_upper_{period}'] = df[f'BB_middle_{period}'] + 2 * std
-            df[f'BB_lower_{period}'] = df[f'BB_middle_{period}'] - 2 * std
-            df[f'BB_width_{period}'] = (df[f'BB_upper_{period}'] - df[f'BB_lower_{period}']) / df[f'BB_middle_{period}']
-        
-        # Advanced Momentum Indicators
-        df['ROC'] = df['current'].pct_change(periods=10) * 100  # Rate of Change
-        df['MFI'] = self.money_flow_index(df)  # Money Flow Index
-        df['ADX'] = self.average_directional_index(df)  # Average Directional Index
-        
-        # Volatility Indicators
-        df['ATR'] = self.average_true_range(df)  # Average True Range
-        df['Volatility'] = df['current'].rolling(window=10).std()
-        df['Volatility_21'] = df['current'].rolling(window=21).std()
-        
-        return df
+class TradeStrategy:
+    """Encapsulates trading strategy logic."""
 
-    def money_flow_index(self, df, period=14):
-        """Calculate Money Flow Index."""
-        typical_price = (df['high'] + df['low'] + df['current']) / 3
-        money_flow = typical_price * df['turnover']
+    def __init__(self):
+        self.current_price = -1
+        self.config_data = read_config()
+        self.remaining_units = int(self.config_data.get('units_per_round', 100))
+        self.remaining_time = int(self.config_data.get('order_round_timeout', 300))
+        self.predictor = StockPredictor()
+        self.predictor.load_trained_model()
+        self.price_history = []
+        self.volume_history = []
+
+    def refresh_remaining_units(self, sold_units):
+        self.remaining_units -= sold_units
+
+    def refresh_remaining_time(self, passed_seconds):
+        self.remaining_time = int(self.config_data.get('order_round_timeout', 300)) - passed_seconds
+        logger.info(f"Remaining Time: {self.remaining_time} seconds")
+
+    def calculate_rsi(self, prices, period=14):
+        """Calculate Relative Strength Index."""
+        deltas = np.diff(prices)
+        gain = np.where(deltas > 0, deltas, 0)
+        loss = np.where(deltas < 0, -deltas, 0)
         
-        positive_flow = money_flow.where(typical_price > typical_price.shift(1), 0)
-        negative_flow = money_flow.where(typical_price < typical_price.shift(1), 0)
+        avg_gain = np.mean(gain[:period])
+        avg_loss = np.mean(loss[:period])
         
-        positive_mf = positive_flow.rolling(window=period).sum()
-        negative_mf = negative_flow.rolling(window=period).sum()
+        if avg_loss == 0:
+            return 100
         
-        mfi = 100 - (100 / (1 + positive_mf / negative_mf))
-        return mfi
-        
-    def average_directional_index(self, df, period=14):
-        """Calculate Average Directional Index."""
-        plus_dm = df['high'].diff()
-        minus_dm = df['low'].diff()
-        plus_dm[plus_dm < 0] = 0
-        minus_dm[minus_dm > 0] = 0
-        
-        tr1 = df['high'] - df['low']
-        tr2 = abs(df['high'] - df['current'].shift(1))
-        tr3 = abs(df['low'] - df['current'].shift(1))
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        
-        atr = tr.rolling(period).mean()
-        plus_di = 100 * (plus_dm.rolling(period).mean() / atr)
-        minus_di = abs(100 * (minus_dm.rolling(period).mean() / atr))
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = dx.rolling(period).mean()
-        return adx
-        
-    def average_true_range(self, df, period=14):
-        """Calculate Average True Range."""
-        high_low = df['high'] - df['low']
-        high_close = abs(df['high'] - df['current'].shift(1))
-        low_close = abs(df['low'] - df['current'].shift(1))
-        
-        ranges = pd.concat([high_low, high_close, low_close], axis=1)
-        true_range = ranges.max(axis=1)
-        atr = true_range.rolling(period).mean()
-        return atr
-        
-    def prepare_features(self, df):
-        """
-        Prepare features for model training/prediction.
-        
-        Args:
-            df (pandas.DataFrame): Input dataframe
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+
+    def calculate_bollinger_bands(self, prices, period=20):
+        """Calculate Bollinger Bands."""
+        sma = np.mean(prices[-period:])
+        std = np.std(prices[-period:])
+        upper_band = sma + (std * 2)
+        lower_band = sma - (std * 2)
+        return upper_band, sma, lower_band
+
+    def calculate_macd(self, prices):
+        """Calculate MACD for recent prices."""
+        if len(prices) < 26:
+            return 0, 0
             
-        Returns:
-            tuple: X (features) and y (target)
-        """
-        # Create a copy to avoid fragmentation
-        df = df.copy()
+        ema12 = pd.Series(prices).ewm(span=12).mean().iloc[-1]
+        ema26 = pd.Series(prices).ewm(span=26).mean().iloc[-1]
+        macd = ema12 - ema26
+        signal = pd.Series([macd]).ewm(span=9).mean().iloc[-1]
+        return macd, signal
+
+    def calculate_units_to_sell(self, trend_strength, time_pressure, volatility):
+        """Calculate dynamic number of units to sell based on market conditions."""
+        base_units = math.ceil(self.remaining_units * 0.2)  # Start with 20% base
         
-        # Add advanced technical indicators
-        df = self.add_advanced_technical_indicators(df)
+        # Adjust based on trend strength (0 to 1)
+        trend_adjustment = 1 + trend_strength
         
-        # Pre-calculate all lag features at once
-        lag_features = {}
-        for col in self.feature_cols:
-            for i in range(1, 16):  # Increased to 15 lag features
-                lag_features[f'{col}_lag_{i}'] = df[col].shift(i)
+        # Adjust based on time pressure (increases as time runs out)
+        time_factor = 1 + (1 - (self.remaining_time / 600))  # 600 seconds = 10 minutes
         
-        # Add all lag features at once
-        df = pd.concat([df, pd.DataFrame(lag_features)], axis=1)
+        # Adjust based on volatility (0 to 1)
+        volatility_adjustment = 1 + volatility
         
-        # Create interaction features
-        interaction_features = {
-            'price_volume': df['current'] * df['turnover'],
-            'high_low_diff': df['high'] - df['low'],
-            'price_momentum': df['current'] * df['ROC'],  # Using ROC instead of Momentum
-            'volume_momentum': df['turnover'] * df['ROC'],
-            'trend_strength': df['ADX'] * df['MACD'],
-            'volatility_ratio': df['ATR'] / df['current']
-        }
-        
-        # Add all interaction features at once
-        df = pd.concat([df, pd.DataFrame(interaction_features)], axis=1)
-        
-        # Drop rows with NaN from shifting and technical indicators
-        df.dropna(inplace=True)
-        
-        # Prepare feature columns
-        base_features = [col for col in df.columns if any(f'{feat}_lag' in col for feat in self.feature_cols)]
-        # Exclude non-numeric columns such as 'status'
-        exclude_cols = base_features + ['date', 'time', 'datetime', 'status'] + self.feature_cols
-        tech_features = [col for col in df.columns if col not in exclude_cols]
-        
-        feature_cols = base_features + tech_features
-        X = df[feature_cols]
-        y = df[self.target_col]
-        
-        # Scale features
-        X_scaled = self.scaler.fit_transform(X)
-        
-        # Feature selection using Random Forest for large datasets
-        if len(X) > 1000:
-            feature_selector = SelectFromModel(
-                RandomForestRegressor(n_estimators=100, random_state=42)
-            )
-            X_scaled = feature_selector.fit_transform(X_scaled, y)
-        
-        return X_scaled, y
-        
-    def build_model(self, model_type='rf'):
-        """
-        Build the model based on specified type.
-        
-        Args:
-            model_type (str): Type of model ('rf' for Random Forest, 'lr' for Linear Regression)
-        """
-        if model_type == 'rf':
-            param_grid = {
-                'n_estimators': [200, 300],
-                'max_depth': [10, 15, 20],
-                'min_samples_split': [2, 5],
-                'min_samples_leaf': [1, 2],
-                'max_features': ['sqrt', 'log2']
-            }
-            
-            base_model = RandomForestRegressor(
-                random_state=42,
-                n_jobs=-1,
-                bootstrap=True,
-                oob_score=True
-            )
-            
-            self.model = GridSearchCV(
-                base_model,
-                param_grid,
-                cv=5,
-                scoring='neg_mean_squared_error',
-                n_jobs=-1,
-                verbose=1
-            )
-        else:
-            self.model = LinearRegression(n_jobs=-1)
-        
-        logger.info(f"Built {model_type.upper()} model")
-        
-    def train(self, X, y):
-        """
-        Train the model.
-        
-        Args:
-            X: Training features
-            y: Training targets
-        """
-        # Split data
-        X_train, X_val, y_train, y_val = train_test_split(
-            X, y, test_size=0.2, random_state=42
+        # Calculate final units
+        units = min(
+            self.remaining_units,
+            math.ceil(base_units * trend_adjustment * time_factor * volatility_adjustment)
         )
         
-        # Train model
-        self.model.fit(X_train, y_train)
-        
-        # Save model
-        joblib.dump(self.model, self.model_path)
-        logger.info("Model trained and saved")
-        
-        # Calculate validation metrics
-        val_pred = self.model.predict(X_val)
-        mae = mean_absolute_error(y_val, val_pred)
-        mse = mean_squared_error(y_val, val_pred)
-        rmse = np.sqrt(mse)
-        
-        metrics = {
-            'MAE': mae,
-            'MSE': mse,
-            'RMSE': rmse
-        }
-        
-        logger.info(f"Validation metrics: {metrics}")
-        return metrics
-        
-    def load_trained_model(self):
-        """
-        Load a pre-trained model if available.
-        """
-        if os.path.exists(self.model_path):
-            self.model = joblib.load(self.model_path)
-            logger.info(f"Loaded pre-trained model from {self.model_path}")
-        else:
-            logger.warning("No pre-trained model found")
-            self.build_model()
-            
-    def predict(self, X):
-        """
-        Make predictions with the model.
-        
-        Args:
-            X: Input features
-            
-        Returns:
-            numpy.array: Predicted values
-        """
-        if self.model is None:
-            self.load_trained_model()
-            
-        return self.model.predict(X)
-        
-    def evaluate(self, X_test, y_test):
-        """
-        Evaluate model performance.
-        
-        Args:
-            X_test: Test features
-            y_test: Test targets
-            
-        Returns:
-            dict: Performance metrics
-        """
-        y_pred = self.predict(X_test)
-        
-        # Calculate regression metrics
-        mae = mean_absolute_error(y_test, y_pred)
-        mse = mean_squared_error(y_test, y_pred)
-        rmse = np.sqrt(mse)
-        r2 = r2_score(y_test, y_pred)
-        
-        # Calculate directional accuracy
-        actual_direction = np.sign(y_test)
-        pred_direction = np.sign(y_pred)
-        direction_accuracy = np.mean(actual_direction == pred_direction)
-        
-        # Create confusion matrix for directional prediction
-        true_pos = np.sum((actual_direction == 1) & (pred_direction == 1))
-        true_neg = np.sum((actual_direction == -1) & (pred_direction == -1))
-        false_pos = np.sum((actual_direction == -1) & (pred_direction == 1))
-        false_neg = np.sum((actual_direction == 1) & (pred_direction == -1))
-        
-        confusion_matrix = {
-            'True Positive (Correctly Predicted Up)': true_pos,
-            'True Negative (Correctly Predicted Down)': true_neg,
-            'False Positive (Incorrectly Predicted Up)': false_pos,
-            'False Negative (Incorrectly Predicted Down)': false_neg
-        }
-        
-        metrics = {
-            'MAE': mae,
-            'MSE': mse,
-            'RMSE': rmse,
-            'R² Score': r2,
-            'Directional Accuracy': direction_accuracy,
-            'Confusion Matrix': confusion_matrix
-        }
-        
-        logger.info(f"Test metrics: {metrics}")
-        return metrics, y_pred
-        
-    def plot_results(self, y_test, y_pred):
-        """
-        Plot prediction results.
-        
-        Args:
-            y_test: Actual test values
-            y_pred: Predicted values
-        """
-        plt.figure(figsize=(12, 6))
-        plt.plot(y_test.values, label='Actual Change')
-        plt.plot(y_pred, label='Predicted Change')
-        plt.title('Stock Change Prediction Results')
-        plt.xlabel('Time')
-        plt.ylabel('Change')
-        plt.legend()
-        plt.savefig('prediction_results.png')
-        plt.close()
-        logger.info("Plot saved as prediction_results.png")
+        # Ensure minimum units are sold
+        return max(1, min(units, self.remaining_units))
 
-def main():
-    """Main function to run the stock prediction pipeline."""
-    try:
-        # Initialize predictor
-        predictor = StockPredictor()
-        
-        # Load and prepare data
-        df = predictor.load_data('synthetic_hsi_last_30_days.csv')
-        X, y = predictor.prepare_features(df)
-        
-        # Build and train model
-        predictor.build_model(model_type='rf')  # Use Random Forest
-        metrics = predictor.train(X, y)
-        
-        # Evaluate on test set
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        test_metrics, y_pred = predictor.evaluate(X_test, y_test)
-        
-        # Plot results
-        predictor.plot_results(y_test, y_pred)
-        
-        logger.info("Stock prediction pipeline completed successfully")
-        print("\nTraining Metrics:")
-        print(f"MAE: {metrics['MAE']:.4f}")
-        print(f"MSE: {metrics['MSE']:.4f}")
-        print(f"RMSE: {metrics['RMSE']:.4f}")
-        if hasattr(predictor.model, 'oob_score_'):
-            print(f"Out-of-Bag Score: {predictor.model.oob_score_:.4f}")
-        
-        print("\nTest Metrics:")
-        print(f"MAE: {test_metrics['MAE']:.4f}")
-        print(f"MSE: {test_metrics['MSE']:.4f}")
-        print(f"RMSE: {test_metrics['RMSE']:.4f}")
-        print(f"R² Score: {test_metrics['R² Score']:.4f}")
-        print(f"Directional Accuracy: {test_metrics['Directional Accuracy']:.2%}")
-        
-        print("\nConfusion Matrix for Directional Prediction:")
-        conf_matrix = test_metrics['Confusion Matrix']
-        print(f"True Positive (Correctly Predicted Up): {conf_matrix['True Positive (Correctly Predicted Up)']}")
-        print(f"True Negative (Correctly Predicted Down): {conf_matrix['True Negative (Correctly Predicted Down)']}")
-        print(f"False Positive (Incorrectly Predicted Up): {conf_matrix['False Positive (Incorrectly Predicted Up)']}")
-        print(f"False Negative (Incorrectly Predicted Down): {conf_matrix['False Negative (Incorrectly Predicted Down)']}")
-        
-    except Exception as e:
-        logger.error(f"Pipeline failed: {str(e)}")
-        raise
+    def make_trade_decision(self, intraday_data, current_data):
+        ORDER_ACTION_SELL = "sell"
+        ORDER_ACTION_HOLD = "hold"
 
-if __name__ == "__main__":
-    main()
+        try:
+            logger.info(f"Remaining Units: {self.remaining_units}")
+            
+            if not intraday_data:
+                return ORDER_ACTION_HOLD, 0
+
+            current_price = float(current_data["current"])
+            self.price_history.append(current_price)
+            self.volume_history.append(float(current_data.get("turnover", 0)))
+
+            # Keep only recent history
+            max_history = 100
+            if len(self.price_history) > max_history:
+                self.price_history = self.price_history[-max_history:]
+                self.volume_history = self.volume_history[-max_history:]
+
+            # Calculate technical indicators
+            rsi = self.calculate_rsi(self.price_history) if len(self.price_history) > 14 else 50
+            upper_band, middle_band, lower_band = self.calculate_bollinger_bands(self.price_history)
+            macd, macd_signal = self.calculate_macd(self.price_history)
+
+            # Prepare data for prediction
+            if len(self.price_history) >= 2:
+                recent_prices = pd.DataFrame({
+                    'current': self.price_history,
+                    'turnover': self.volume_history,
+                    'high': self.price_history,  # Simplified for demonstration
+                    'low': self.price_history,   # Simplified for demonstration
+                    'change': np.diff(self.price_history + [current_price]),
+                    'percent': np.diff(self.price_history + [current_price]) / self.price_history[-1] * 100
+                })
+                
+                # Get prediction if enough data is available
+                try:
+                    X, _ = self.predictor.prepare_features(recent_prices)
+                    prediction = self.predictor.predict(X)[-1]  # Get latest prediction
+                except Exception as e:
+                    logger.warning(f"Prediction failed: {e}")
+                    prediction = 0
+
+                # Calculate trend strength (0 to 1)
+                trend_strength = abs(macd) / (max(self.price_history) - min(self.price_history))
+                
+                # Calculate volatility (0 to 1)
+                volatility = (upper_band - lower_band) / middle_band
+
+                # Decision making logic
+                if self.remaining_units <= 0:
+                    logger.info("[Trade Strategy] All units sold out")
+                    return ORDER_ACTION_HOLD, 0
+                
+                # Emergency time-based selling
+                if self.remaining_time <= 20:
+                    logger.info("[Trade Strategy] Emergency time-based selling")
+                    return ORDER_ACTION_SELL, self.remaining_units
+
+                # Strong sell signals
+                if (rsi > 70 and current_price > upper_band) or \
+                   (prediction < -0.5 and macd < macd_signal):
+                    units = self.calculate_units_to_sell(trend_strength, 0.8, volatility)
+                    logger.info("[Trade Strategy] Strong sell signal")
+                    return ORDER_ACTION_SELL, units
+
+                # Moderate sell signals
+                if (rsi > 60 and current_price > middle_band) or \
+                   (prediction < -0.2 and current_price > middle_band):
+                    units = self.calculate_units_to_sell(trend_strength, 0.5, volatility)
+                    logger.info("[Trade Strategy] Moderate sell signal")
+                    return ORDER_ACTION_SELL, units
+
+                # Weak sell signals
+                if self.remaining_time < 300 and self.remaining_units > 50:  # Last 5 minutes with >50% units
+                    units = self.calculate_units_to_sell(trend_strength, 0.3, volatility)
+                    logger.info("[Trade Strategy] Time-based sell signal")
+                    return ORDER_ACTION_SELL, units
+
+            logger.info("[Trade Strategy] No suitable strategy")
+            return ORDER_ACTION_HOLD, 0
+
+        except Exception as e:
+            logger.exception(e)
+            logger.error("[Trade Strategy] Exception found")
+            return ORDER_ACTION_HOLD, 0
