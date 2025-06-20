@@ -8,9 +8,6 @@ import os
 import sys
 
 class DatabaseComparer:
-    """
-    A class to compare a table's schema and data between Sybase and MSSQL Server.
-    """
 
     def __init__(self, sybase_config, mssql_config):
         """
@@ -112,8 +109,7 @@ class DatabaseComparer:
 
         # Columns
         try:
-            col_query = f
-            """
+            col_query = f"""
             SELECT
                 c.name AS column_name,
                 t.name AS data_type,
@@ -143,8 +139,7 @@ class DatabaseComparer:
         # Primary Key & Indexes
         try:
             # Combined query for PK and other indexes
-            idx_query = f
-            """
+            idx_query = f"""
             SELECT
                 i.name AS index_name,
                 CASE
@@ -384,8 +379,7 @@ class DatabaseComparer:
 
         # Foreign Keys
         try:
-            fk_query = f
-            """
+            fk_query = f"""
             SELECT
                 fk.name AS fk_constraint_name,
                 COL_NAME(fkc.parent_object_id, fkc.parent_column_id) AS fk_column,
@@ -635,6 +629,7 @@ class DatabaseComparer:
     def generate_excel_report(self, comparison_results, output_dir="."):
         """
         Generates an Excel report for the comparison results.
+        Beyond these, the script also provides highly detailed comparison reports.
 
         Args:
             comparison_results (dict): The dictionary containing comparison results.
