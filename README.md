@@ -1,169 +1,322 @@
-def write_full_data_comparison_sheet(workbook, table_name, sybase_data, mssql_data, sybase_schema):
+def main():
 
     """
 
-    Writes the full data comparison, row by row based on the first column, to a new Excel sheet.
-
-    Highlights discrepancies and rows unique to one database.
+    Main function to orchestrate the database comparison process and generate Excel report.
 
     """
 
-    full_data_sheet = workbook.create_sheet("Full Data Comparison")
+    if len(sys.argv) < 2:
 
-    full_data_sheet['A1'] = f"Full Data Comparison for Table: {table_name}"
+        print("Usage: python compare_db_data.py <table_name>")
 
-    full_data_sheet['A1'].font = Font(bold=True, size=14)
+        sys.exit(1) # Exit if no table name is provided
 
 
 
-    # Prepare column headers
+    table_name = sys.argv[1]
 
-    if sybase_schema:
 
-        # Create a list of column names for the header row
 
-        sybase_column_names = [col['name'] for col in sybase_schema]
+    # --- Sybase Connection Details (PLACEHOLDERS - REPLACE WITH YOUR ACTUAL DETAILS) ---
 
-        headers = ["Database"] + sybase_column_names # Add a 'Database' column to distinguish Sybase/MSSQL rows
+    SYBASE_DSN = "YOUR_SYBASE_DSN"       # e.g., "Sybase_Prod_DB" - Must be configured on your OS
+
+    SYBASE_UID = "YOUR_SYBASE_USERNAME"
+
+    SYBASE_PWD = "YOUR_SYBASE_PASSWORD"
+
+
+
+    # --- MSSQL Connection Details (PLACEHOLDERS - REPLACE WITH YOUR ACTUAL DETAILS) ---
+
+    MSSQL_SERVER = "YOUR_MSSQL_SERVER_IP_OR_HOSTNAME" # e.g., "localhost", "192.168.1.10", or "your_server_name\SQLEXPRESS"
+
+    MSSQL_DATABASE = "YOUR_MSSQL_DATABASE" # e.g., "SalesDB"
+
+    MSSQL_USER = "YOUR_MSSQL_USERNAME"
+
+    MSSQL_PASSWORD = "YOUR_MSSQL_PASSWORD"
+
+
+
+    # --- Establish Database Connections ---
+
+    sybase_conn = get_sybase_connection(SYBASE_DSN, SYBASE_UID, SYBASE_PWD)
+
+    mssql_conn = get_mssql_connection(MSSQL_SERVER, MSSQL_USER, MSSQL_PASSWORD, MSSQL_DATABASE)
+
+
+
+    sybase_cursor = sybase_conn.cursor()
+
+    mssql_cursor = mssql_conn.cursor()
+
+
+
+    print(f"\n--- Starting Comparison for Table: '{table_name}' ---")
+
+
+
+    # Initialize results containers
+
+    summary_results = {
+
+        'counts_match': False,
+
+        'schemas_match': False,
+
+        'data_matches': False
+
+    }
+
+    schema_diffs = []
+
+    data_diffs = []
+
+    sybase_count = -1
+
+    mssql_count = -1
+
+
+
+    # --- 1. Compare Record Counts ---
+
+    sybase_count = get_record_count(sybase_cursor, table_name)
+
+    mssql_count = get_record_count(mssql_cursor, table_name)
+
+    if sybase_count != -1 and mssql_count != -1:
+
+        summary_results['counts_match'] = (sybase_count == mssql_count)
+
+        print(f"Record Counts: Sybase={sybase_count}, MSSQL={mssql_count}. Match: {summary_results['counts_match']}")
 
     else:
 
-        # Fallback if schema is not available, just use generic headers
+        print("Could not retrieve one or both record counts due to prior errors.")
 
-        num_cols = len(sybase_data[0]) if sybase_data else (len(mssql_data[0]) if mssql_data else 0)
 
-        headers = ["Database"] + [f"Column {i+1}" for i in range(num_cols)]
 
+    # --- 2. Compare Schemas (Column Names and Data Types) ---
 
+    sybase_schema = get_table_schema(sybase_cursor, 'sybase', table_name)
 
-    # Write header row
+    mssql_schema = get_table_schema(mssql_cursor, 'mssql', table_name)
 
-    full_data_sheet.append(headers)
 
-    # Apply bold font to header row
 
-    for cell in full_data_sheet[2]:
+    if sybase_schema is not None and mssql_schema is not None:
 
-        cell.font = Font(bold=True)
+        sybase_cols = {col['name'].lower(): col['type'].lower() for col in sybase_schema}
 
+        mssql_cols = {col['name'].lower(): col['type'].lower() for col in mssql_schema}
 
+        all_col_names = sorted(list(set(sybase_cols.keys()).union(mssql_cols.keys())))
 
-    # Create maps for quick lookup by the first column's value
 
-    # Important: If the first column is not unique, this will only store the last encountered row for that key.
 
-    sybase_map = {row[0]: row for row in sybase_data} if sybase_data else {}
+        current_schemas_match = True
 
-    mssql_map = {row[0]: row for row in mssql_data} if mssql_data else {}
+        for col_name in all_col_names:
 
+            sybase_type = sybase_cols.get(col_name)
 
+            mssql_type = mssql_cols.get(col_name)
 
-    all_keys = sorted(list(set(sybase_map.keys()).union(mssql_map.keys())))
 
 
+            if sybase_type is None:
 
-    current_row_excel = 2 # Start writing data from row 3 (after title and headers)
+                schema_diffs.append({
 
+                    'status': 'MSSQL_ONLY',
 
+                    'column_name': col_name,
 
-    for key in all_keys:
+                    'mssql_type': mssql_type
 
-        sybase_row_data = sybase_map.get(key)
+                })
 
-        mssql_row_data = mssql_map.get(key)
+                current_schemas_match = False
 
+            elif mssql_type is None:
 
+                schema_diffs.append({
 
-        # Write Sybase row
+                    'status': 'SYBASE_ONLY',
 
-        if sybase_row_data:
+                    'column_name': col_name,
 
-            current_row_excel += 1
+                    'sybase_type': sybase_type
 
-            row_to_write = ["Sybase"] + list(sybase_row_data)
+                })
 
-            full_data_sheet.append(row_to_write)
+                current_schemas_match = False
 
-            
+            elif sybase_type != mssql_type:
 
-            # Apply fill and check for mismatches against MSSQL data
+                schema_diffs.append({
 
-            for col_idx in range(len(sybase_row_data)):
+                    'status': 'TYPE_MISMATCH',
 
-                cell = full_data_sheet.cell(row=current_row_excel, column=col_idx + 2) # +2 for "Database" column and 0-index
+                    'column_name': col_name,
 
-                if mssql_row_data is None: # Row only in Sybase
+                    'sybase_type': sybase_type,
 
-                    cell.fill = GREEN_FILL
+                    'mssql_type': mssql_type
 
-                elif sybase_row_data[col_idx] != mssql_row_data[col_idx]: # Mismatch for this column
+                })
 
-                    cell.fill = RED_FILL
+                current_schemas_match = False
 
-        
+        summary_results['schemas_match'] = current_schemas_match
 
-        # Write MSSQL row
+        print(f"Schemas (Columns & Types) Match: {summary_results['schemas_match']}")
 
-        if mssql_row_data:
+    else:
 
-            current_row_excel += 1
+        print("Skipping schema comparison due to errors in fetching one or both schemas.")
 
-            row_to_write = ["MSSQL"] + list(mssql_row_data)
 
-            full_data_sheet.append(row_to_write)
 
-            
 
-            # Apply fill and check for mismatches against Sybase data
 
-            for col_idx in range(len(mssql_row_data)):
+    # --- 3. Compare Data in Each Column (Value-by-Value) ---
 
-                cell = full_data_sheet.cell(row=current_row_excel, column=col_idx + 2) # +2 for "Database" column and 0-index
+    # Fetch data here so it can be passed to both data comparison sheets
 
-                if sybase_row_data is None: # Row only in MSSQL
+    sybase_data = None
 
-                    cell.fill = BLUE_FILL
+    mssql_data = None
 
-                elif sybase_row_data[col_idx] != mssql_row_data[col_idx]: # Mismatch for this column
+    if summary_results['counts_match'] and summary_results['schemas_match']:
 
-                    cell.fill = RED_FILL
+        print("\nFetching all data for detailed column-by-column comparison. This might take significant time for large tables...")
 
+        sybase_data = get_table_data(sybase_cursor, table_name, 'sybase', sybase_schema)
 
+        mssql_data = get_table_data(mssql_cursor, table_name, 'mssql', mssql_schema)
 
-        # Add a separator row for better readability if both were present or if it's the end of a block
 
-        current_row_excel += 1
 
-        full_data_sheet.append([''] * len(headers)) # Empty row as separator
+        if sybase_data is not None and mssql_data is not None:
 
-        # Optional: Add a subtle border
+            current_data_matches = True
 
-        for col_idx in range(1, len(headers) + 1):
+            if len(sybase_data) != len(mssql_data):
 
-            full_data_sheet.cell(row=current_row_excel, column=col_idx).border = Border(top=Side(style='dotted'))
+                print(f"WARNING: Data comparison skipped. Record counts differ (Sybase: {len(sybase_data)}, MSSQL: {len(mssql_data)}).")
 
+                current_data_matches = False # Even if fetching succeeded, counts mismatch means data doesn't match
 
+            elif not sybase_data: # Both are empty if they match here and sybase_data is empty
 
+                print("Both tables are empty. Data comparison considered a match.")
 
+            else:
 
-    # Auto-width for Full Data Comparison Sheet
+                num_columns = len(sybase_data[0])
 
-    for col_idx, column in enumerate(full_data_sheet.iter_cols()):
+                for i in range(len(sybase_data)):
 
-        max_length = 0
+                    sybase_row = sybase_data[i]
 
-        for cell in column:
+                    mssql_row = mssql_data[i]
 
-            try:
+                    if sybase_row != mssql_row:
 
-                if cell.value is not None and len(str(cell.value)) > max_length:
+                        current_data_matches = False
 
-                    max_length = len(str(cell.value))
+                        for j in range(num_columns):
 
-            except:
+                            sybase_val = sybase_row[j]
 
-                pass
+                            mssql_val = mssql_row[j]
 
-        adjusted_width = (max_length + 2) * 1.2
+                            if sybase_val != mssql_val:
 
-        full_data_sheet.column_dimensions[get_column_letter(col_idx + 1)].width = adjusted_width
+                                data_diffs.append({
+
+                                    'row_index': i + 1,
+
+                                    'col_index': j + 1,
+
+                                    'sybase_value': str(sybase_val), # Convert to string for Excel
+
+                                    'mssql_value': str(mssql_val)
+
+                                })
+
+            summary_results['data_matches'] = current_data_matches
+
+            print(f"Data in Columns Match: {summary_results['data_matches']}")
+
+        else:
+
+            print("Skipping detailed data comparison due to errors in fetching one or both datasets.")
+
+    else:
+
+        print("Skipping detailed data comparison because record counts or schemas did not match.")
+
+
+
+    # --- Generate Excel Report ---
+
+    filename = f"{table_name}.xlsx"
+
+    workbook = openpyxl.Workbook()
+
+
+
+    write_summary_and_schema_to_excel(workbook, table_name, summary_results, schema_diffs, sybase_count, mssql_count)
+
+    write_data_discrepancies_sheet(workbook, data_diffs)
+
+    
+
+    # Only call full data comparison if data was successfully retrieved
+
+    if sybase_data is not None and mssql_data is not None:
+
+        write_full_data_comparison_sheet(workbook, table_name, sybase_data, mssql_data, sybase_schema)
+
+    else:
+
+        print("Skipping full data comparison sheet generation as data could not be retrieved.")
+
+
+
+    try:
+
+        workbook.save(filename)
+
+        print(f"\nComparison report saved to '{filename}' successfully.")
+
+    except Exception as ex:
+
+        print(f"ERROR: Could not save Excel file '{filename}': {ex}")
+
+
+
+
+
+    # --- Close Database Connections ---
+
+    sybase_cursor.close()
+
+    sybase_conn.close()
+
+    mssql_cursor.close()
+
+    mssql_conn.close()
+
+    print("\nDatabase connections closed.")
+
+
+
+if __name__ == "__main__":
+
+    main()
+
