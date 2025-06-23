@@ -1,653 +1,397 @@
+import sys
 import pyodbc
 import pymssql
-import pandas as pd
-import json # For handling potential issues with serializing specific column types to JSON for logging/reporting
-import sys # For checking Python version
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
-# Pre-requisite Check for Python Version ---
-if sys.version_info < (3, 12):
-    print("Warning: Python 3.12+ is recommended for this script. You are using Python", sys.version)
-
-#
-# IMPORTANT: Replace these placeholders with your actual database connection details.
-
-# Sybase Connection Details
-# Ensure you have the correct ODBC driver installed for Sybase.
-# Common drivers include 'Adaptive Server Enterprise', 'Sybase ASE ODBC Driver',
-# or sometimes '{ODBC Driver 17 for SQL Server}' if Sybase is accessed via a SQL Server-compatible driver.
-# You may need to experiment to find the correct DRIVER string for your setup.
-SYBASE_SERVER = 'your_sybase_server_address'
-SYBASE_DATABASE = 'your_sybase_database_name'
-SYBASE_USERNAME = 'your_sybase_username'
-SYBASE_PASSWORD = 'your_sybase_password'
-SYBASE_DRIVER = '{ODBC Driver 17 for SQL Server}' # <<< ADJUST THIS IF NEEDED >>>
-
-# SQL Server Connection Details
-SQLSERVER_SERVER = 'your_sqlserver_server_address'
-SQLSERVER_DATABASE = 'your_sqlserver_database_name'
-SQLSERVER_USERNAME = 'your_sqlserver_username'
-SQLSERVER_PASSWORD = 'your_sqlserver_password'
-
-# Output Excel Report Name
-REPORT_FILE = 'database_comparison_report.xlsx'
-
-# Helper Functions for Database Operations ---
-
-def get_sybase_connection():
-    """Establishes and returns a connection to the Sybase database."""
+def get_sybase_connection(dsn, uid, pwd):
+    """
+    Establishes and returns a connection to Sybase database using pyodbc.
+    Replace DSN, UID, PWD with your actual Sybase connection details.
+    Ensure you have the correct Sybase ODBC driver installed and configured.
+    """
     try:
-        conn_str = (
-            f"DRIVER={SYBASE_DRIVER};"
-            f"SERVER={SYBASE_SERVER};"
-            f"DATABASE={SYBASE_DATABASE};"
-            f"UID={SYBASE_USERNAME};"
-            f"PWD={SYBASE_PASSWORD};"
-        )
-        # autocommit=True is often useful for simple read operations to avoid explicit commits.
-        conn = pyodbc.connect(conn_str, autocommit=True)
+        # Example DSN-based connection. If not using DSN, provide a direct connection string like:
+        # conn_str = "DRIVER={Sybase Adaptive Server Enterprise};SERVER=your_sybase_server:port;DATABASE=your_sybase_db;UID=your_sybase_user;PWD=your_sybase_password"
+        conn_str = f"DSN={dsn};UID={uid};PWD={pwd}"
+        conn = pyodbc.connect(conn_str, autocommit=True) # autocommit is often suitable for read operations
         print("Connected to Sybase successfully.")
         return conn
     except pyodbc.Error as ex:
         sqlstate = ex.args[0]
-        print(f"Error connecting to Sybase: SQLSTATE={sqlstate} - Message: {ex.args[1]}")
-        return None
-    except Exception as ex:
-        print(f"An unexpected error occurred while connecting to Sybase: {ex}")
-        return None
+        print(f"ERROR: Sybase Connection Failed: {sqlstate} - {ex.args[1]}")
+        sys.exit(1) # Exit if connection fails
 
-def get_sqlserver_connection():
-    """Establishes and returns a connection to the SQL Server database."""
+def get_mssql_connection(server, user, password, database):
+    """
+    Establishes and returns a connection to MSSQL database using pymssql.
+    Replace SERVER, USER, PASSWORD, DATABASE with your actual MSSQL connection details.
+    """
     try:
-        # as_dict=False means rows are returned as tuples, which is suitable for pandas.read_sql.
-        conn = pymssql.connect(
-            server=SQLSERVER_SERVER,
-            user=SQLSERVER_USERNAME,
-            password=SQLSERVER_PASSWORD,
-            database=SQLSERVER_DATABASE,
-            as_dict=False
-        )
-        print("Connected to SQL Server successfully.")
+        conn = pymssql.connect(server=server, user=user, password=password, database=database)
+        print("Connected to MSSQL successfully.")
         return conn
     except Exception as ex:
-        print(f"Error connecting to SQL Server: {ex}")
-        return None
+        print(f"ERROR: MSSQL Connection Failed: {ex}")
+        sys.exit(1) # Exit if connection fails
 
-def get_tables(conn, db_type):
+def get_table_schema(db_cursor, db_type, table_name):
     """
-    Retrieves a list of table names from the given database connection.
-    Args:
-        conn: Database connection object (pyodbc or pymssql).
-        db_type: 'sybase' or 'sqlserver' to determine the appropriate system query.
-    Returns:
-        A list of table names (strings). Returns an empty list if an error occurs.
+    Fetches schema information (column names and data types) for a given table.
+    Returns a list of dictionaries with 'name' and 'type'.
     """
+    schema = []
     try:
-        cursor = conn.cursor()
         if db_type == 'sybase':
-            # Sybase: Query sys.sysobjects for user tables (type 'U').
-            query = "SELECT name FROM sys.sysobjects WHERE type = 'U' ORDER BY name"
-        elif db_type == 'sqlserver':
-            # SQL Server: Query INFORMATION_SCHEMA.TABLES for base tables.
-            query = "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME"
+            # For Sybase, using sp_columns stored procedure.
+            # The output columns can vary slightly by Sybase version,
+            # but COLUMN_NAME (index 3) and TYPE_NAME (index 5) are common.
+            db_cursor.execute(f"EXEC sp_columns '{table_name}'")
+            for row in db_cursor:
+                # Adjust indices if your sp_columns output differs
+                schema.append({'name': row[3], 'type': row[5]})
+        elif db_type == 'mssql':
+            # For MSSQL, using INFORMATION_SCHEMA.COLUMNS view.
+            db_cursor.execute(
+                f"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+                f"WHERE TABLE_NAME = '{table_name}' ORDER BY ORDINAL_POSITION"
+            )
+            for row in db_cursor:
+                schema.append({'name': row[0], 'type': row[1]})
         else:
-            raise ValueError("Unsupported database type. Use 'sybase' or 'sqlserver'.")
-
-        cursor.execute(query)
-        tables = [row[0] for row in cursor.fetchall()]
-        cursor.close()
-        return tables
-    except Exception as ex:
-        print(f"Error getting tables from {db_type}: {ex}")
-        return []
-
-def get_table_schema(conn, table_name, db_type):
-    """
-    Retrieves the schema (column names and data types) for a given table.
-    Args:
-        conn: Database connection object.
-        table_name: Name of the table.
-        db_type: 'sybase' or 'sqlserver'.
-    Returns:
-        A list of dictionaries, each representing a column (e.g., {'COLUMN_NAME': 'id', 'DATA_TYPE': 'int'}).
-        Returns an empty list if an error occurs.
-    """
-    try:
-        cursor = conn.cursor()
-        if db_type == 'sybase':
-            # Sybase: Joins syscolumns (for column names) and systypes (for data types)
-            # using sysobjects to filter by table name.
-            query = f"""
-            SELECT
-                c.name AS COLUMN_NAME,
-                t.name AS DATA_TYPE
-            FROM
-                syscolumns c
-            JOIN
-                sysobjects o ON c.id = o.id
-            JOIN
-                systypes t ON c.type = t.type
-            WHERE
-                o.name = '{table_name}'
-            ORDER BY c.colid;
-            """
-        elif db_type == 'sqlserver':
-            # SQL Server: Queries INFORMATION_SCHEMA.COLUMNS.
-            query = f"""
-            SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_NAME = '{table_name}' ORDER BY ORDINAL_POSITION;
-            """
-        else:
-            raise ValueError("Unsupported database type.")
-
-        cursor.execute(query)
-        # Fetch results and format into a list of dictionaries.
-        schema = [{'COLUMN_NAME': row[0], 'DATA_TYPE': row[1]} for row in cursor.fetchall()]
-        cursor.close()
+            print(f"WARNING: Unsupported database type '{db_type}' for schema retrieval.")
+            return None
         return schema
     except Exception as ex:
-        print(f"Error getting schema for {table_name} from {db_type}: {ex}")
-        return []
+        print(f"ERROR: Failed to fetch schema for {db_type} table '{table_name}': {ex}")
+        return None
 
-def get_primary_keys(conn, table_name, db_type):
+def get_record_count(db_cursor, table_name):
     """
-    Retrieves primary key column names for a given table.
-    Args:
-        conn: Database connection object.
-        table_name: Name of the table.
-        db_type: 'sybase' or 'sqlserver'.
-    Returns:
-        A list of primary key column names (strings). Returns an empty list if no PKs found or an error occurs.
-    """
-    pk_columns = []
-    try:
-        cursor = conn.cursor()
-        if db_type == 'sybase':
-            # Sybase: Attempts to use the sp_pkeys stored procedure.
-            # This is the most direct way for Sybase. Output structure can vary slightly by Sybase version.
-            # Assumes COLUMN_NAME is at index 3 in sp_pkeys result.
-            try:
-                # Ensure table_name is properly quoted/escaped if it contains special characters
-                cursor.execute(f"EXEC sp_pkeys '{table_name}'")
-                results = cursor.fetchall()
-                if results:
-                    # sp_pkeys typically returns: TABLE_CAT, TABLE_SCHEM, TABLE_NAME, COLUMN_NAME, KEY_SEQ, PK_NAME
-                    # We are interested in COLUMN_NAME (index 3).
-                    pk_columns = [row[3] for row in results if len(row) > 3]
-                else:
-                    print(f"No primary keys reported by sp_pkeys for {table_name} in Sybase.")
-            except pyodbc.ProgrammingError as pe:
-                # This error can occur if sp_pkeys is not available or has different permissions.
-                print(f"Warning: Could not execute sp_pkeys for table {table_name} in Sybase. Error: {pe}. "
-                      "This table will be compared using all common columns if no PKs are found.")
-                pk_columns = [] # Fallback to empty list
-            except Exception as e:
-                print(f"Warning: Unexpected error calling sp_pkeys for {table_name} in Sybase: {e}. "
-                      "This table will be compared using all common columns if no PKs are found.")
-                pk_columns = []
-
-        elif db_type == 'sqlserver':
-            # SQL Server: Queries INFORMATION_SCHEMA.TABLE_CONSTRAINTS and KEY_COLUMN_USAGE.
-            query = f"""
-            SELECT kcu.COLUMN_NAME
-            FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-            JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
-            ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
-            WHERE tc.TABLE_NAME = '{table_name}' AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-            ORDER BY kcu.ORDINAL_POSITION;
-            """
-            cursor.execute(query)
-            pk_columns = [row[0] for row in cursor.fetchall()]
-        else:
-            raise ValueError("Unsupported database type.")
-
-        cursor.close()
-        return pk_columns
-    except Exception as ex:
-        print(f"Error getting primary keys for {table_name} from {db_type}: {ex}")
-        return []
-
-def get_row_count(conn, table_name):
-    """
-    Retrieves the row count for a given table.
-    Args:
-        conn: Database connection object.
-        table_name: Name of the table.
-    Returns:
-        The row count (int), or -1 if an error occurs (e.g., table not found, permission issue).
+    Fetches the total record count for a given table.
     """
     try:
-        cursor = conn.cursor()
-        cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-        count = cursor.fetchone()[0]
-        cursor.close()
+        db_cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+        count = db_cursor.fetchone()[0]
         return count
     except Exception as ex:
-        print(f"Error getting row count for {table_name}: {ex}")
-        return -1
+        print(f"ERROR: Failed to fetch record count for table '{table_name}': {ex}")
+        return -1 # Return -1 to indicate an error
 
-def clean_data_for_comparison(df):
+def get_table_data(db_cursor, table_name, db_type, schema):
     """
-    Cleans a DataFrame for comparison: trims strings, handles NULLs/empty strings.
-    The requirement is "Handle NULLs and empty strings as equal."
-    This function replaces pandas' NaN (for numbers) and None (for objects) with an empty string,
-    then trims all string columns.
-    Args:
-        df: pandas DataFrame.
-    Returns:
-        Cleaned pandas DataFrame.
+    Fetches all data from a given table and returns it as a sorted list of tuples.
+    Data is processed to ensure consistent comparison (e.g., binary to hex, dates to ISO strings).
+    Rows are sorted to ensure reliable row-by-row comparison.
+    It now requires schema to correctly order by all columns.
     """
-    # Create a copy to avoid modifying the original DataFrame in place
-    df_cleaned = df.copy()
-
-    # Fill all NaN/None values with empty string across the entire DataFrame
-    df_cleaned = df_cleaned.fillna('')
-
-    # Iterate through columns identified as object (strings) or explicitly string type
-    for col in df_cleaned.select_dtypes(include=['object', 'string']).columns:
-        # Ensure column is treated as string before stripping
-        df_cleaned[col] = df_cleaned[col].astype(str).str.strip()
-    return df_cleaned
-
-def compare_tables(syb_conn, sql_conn, table_name):
-    """
-    Compares schema, row counts, and data for a given table between Sybase and SQL Server.
-    Args:
-        syb_conn: Sybase database connection object.
-        sql_conn: SQL Server database connection object.
-        table_name: Name of the table to compare.
-    Returns:
-        A dictionary containing detailed comparison results for the table.
-    """
-    results = {
-        'table_name': table_name,
-        'schema_match': False,
-        'row_count_syb': -1,
-        'row_count_sql': -1,
-        'rows_missing_in_target': 0,
-        'rows_added_in_target': 0,
-        'value_mismatches_count': 0,
-        'overall_status': 'UNKNOWN', # Initial status
-        'detailed_differences': []    # Stores row-level differences for the report
-    }
-
-    print(f"\n--- Comparing table: {table_name} ---")
-
-    # --- 1. Compare Schema ---
-    syb_schema = get_table_schema(syb_conn, table_name, 'sybase')
-    sql_schema = get_table_schema(sql_conn, table_name, 'sqlserver')
-
-    if not syb_schema or not sql_schema:
-        print(f"Skipping schema comparison for {table_name} due to missing schema information (e.g., table not found or permission issue).")
-        results['overall_status'] = 'SCHEMA_ERROR'
-        results['detailed_differences'].append({
-            'Action': 'SCHEMA_ERROR',
-            'Column': 'N/A',
-            'Source_Value': 'Could not retrieve Sybase schema.',
-            'Target_Value': 'Could not retrieve SQL Server schema.',
-            'Row_Identifier': 'N/A'
-        })
-        return results
-
-    # Convert schema to DataFrames for easier comparison
-    syb_schema_df = pd.DataFrame(syb_schema).astype(str)
-    sql_schema_df = pd.DataFrame(sql_schema).astype(str)
-
-    # Sort schemas by column name to ensure consistent order for comparison
-    syb_schema_df = syb_schema_df.sort_values(by='COLUMN_NAME').reset_index(drop=True)
-    sql_schema_df = sql_schema_df.sort_values(by='COLUMN_NAME').reset_index(drop=True)
-
-    if syb_schema_df.equals(sql_schema_df):
-        results['schema_match'] = True
-        print(f"Schema for {table_name}: MATCH")
-    else:
-        results['schema_match'] = False
-        print(f"Schema for {table_name}: MISMATCH")
-        # Log detailed schema differences
-        merged_schema = pd.merge(syb_schema_df, sql_schema_df, on='COLUMN_NAME', how='outer', suffixes=('_SYB', '_SQL'))
-
-        # Identify columns with differing data types
-        type_diffs = merged_schema[merged_schema['DATA_TYPE_SYB'] != merged_schema['DATA_TYPE_SQL']]
-        # Filter out rows where one of the data types is NaN (indicating column missing)
-        type_diffs = type_diffs.dropna(subset=['DATA_TYPE_SYB', 'DATA_TYPE_SQL'])
-        if not type_diffs.empty:
-            for idx, row in type_diffs.iterrows():
-                results['detailed_differences'].append({
-                    'Action': 'SCHEMA MISMATCH - DATA TYPE',
-                    'Column': row['COLUMN_NAME'],
-                    'Source_Value': row['DATA_TYPE_SYB'],
-                    'Target_Value': row['DATA_TYPE_SQL'],
-                    'Row_Identifier': 'N/A'
-                })
-
-        # Identify columns missing in Sybase (present in SQL Server only)
-        missing_in_syb = merged_schema[merged_schema['DATA_TYPE_SYB'].isnull()]
-        if not missing_in_syb.empty:
-            for idx, row in missing_in_syb.iterrows():
-                results['detailed_differences'].append({
-                    'Action': 'SCHEMA MISMATCH - COLUMN MISSING IN SYBASE',
-                    'Column': row['COLUMN_NAME'],
-                    'Source_Value': 'N/A',
-                    'Target_Value': row['DATA_TYPE_SQL'],
-                    'Row_Identifier': 'N/A'
-                })
-
-        # Identify columns missing in SQL Server (present in Sybase only)
-        missing_in_sql = merged_schema[merged_schema['DATA_TYPE_SQL'].isnull()]
-        if not missing_in_sql.empty:
-            for idx, row in missing_in_sql.iterrows():
-                results['detailed_differences'].append({
-                    'Action': 'SCHEMA MISMATCH - COLUMN MISSING IN SQLSERVER',
-                    'Column': row['COLUMN_NAME'],
-                    'Source_Value': row['DATA_TYPE_SYB'],
-                    'Target_Value': 'N/A',
-                    'Row_Identifier': 'N/A'
-                })
-
-    # --- 2. Compare Row Counts ---
-    results['row_count_syb'] = get_row_count(syb_conn, table_name)
-    results['row_count_sql'] = get_row_count(sql_conn, table_name)
-    print(f"Row count for {table_name}: Sybase={results['row_count_syb']}, SQL Server={results['row_count_sql']}")
-
-    # If row counts are -1, it indicates an error in fetching.
-    if results['row_count_syb'] == -1 or results['row_count_sql'] == -1:
-        print(f"Skipping data comparison for {table_name} due to row count fetch errors.")
-        results['overall_status'] = 'ROW_COUNT_ERROR'
-        return results
-
-    # --- 3. Compare Data ---
-    # Only proceed with data comparison if schemas match (or if a partial comparison is acceptable,
-    # but for migration verification, schema match is crucial).
-    if not results['schema_match']:
-        print(f"Skipping data comparison for {table_name} due to schema mismatch.")
-        results['overall_status'] = 'SCHEMA_MISMATCH'
-        return results
-
-    syb_pk_columns = get_primary_keys(syb_conn, table_name, 'sybase')
-    sql_pk_columns = get_primary_keys(sql_conn, table_name, 'sqlserver')
-
-    # Determine the key columns for merging DataFrames
-    common_pk_columns = []
-    if syb_pk_columns and sql_pk_columns:
-        # Find intersection of PKs. If not all PKs are common, warn and fallback.
-        common_pk_columns = list(set(syb_pk_columns) & set(sql_pk_columns))
-        if not common_pk_columns:
-            print(f"Warning: Primary keys reported by Sybase ({syb_pk_columns}) and SQL Server ({sql_pk_columns}) "
-                  f"for {table_name} do not overlap. Will compare all common columns.")
-    else:
-        print(f"Warning: Could not determine consistent primary keys for {table_name} (Sybase PKs: {syb_pk_columns}, SQL Server PKs: {sql_pk_columns}). "
-              "Will compare all common columns.")
-
     try:
-        syb_df = pd.read_sql(f"SELECT * FROM {table_name}", syb_conn)
-        sql_df = pd.read_sql(f"SELECT * FROM {table_name}", sql_conn)
+        order_by_clause = ""
+        if schema:
+            column_names = [col['name'] for col in schema]
+            if column_names:
+                # Quote column names for safety in case they contain spaces or special chars.
+                # Double quotes are generally more portable across systems for this purpose.
+                # Consider specific quoting rules for your Sybase version if issues arise.
+                order_by_clause = "ORDER BY " + ", ".join([f'"{col}"' for col in column_names])
+            else:
+                print(f"WARNING: No columns found in schema for table '{table_name}', cannot use ORDER BY.")
+        else:
+            print(f"WARNING: Schema not provided or empty for table '{table_name}', cannot use ORDER BY.")
+
+
+        query = f"SELECT * FROM {table_name} {order_by_clause}"
+        db_cursor.execute(query)
+        data = db_cursor.fetchall()
+
+        processed_data = []
+        for row in data:
+            processed_row = []
+            for item in row:
+                if isinstance(item, (bytes, bytearray)):
+                    # Convert binary data to hex string for consistent comparison
+                    processed_row.append(item.hex())
+                elif hasattr(item, 'isoformat'): # Handles datetime.date, datetime.datetime objects
+                    processed_row.append(item.isoformat())
+                else:
+                    processed_row.append(item)
+            processed_data.append(tuple(processed_row))
+
+        # Sort the list of tuples for reliable comparison, crucial if database order isn't guaranteed
+        # by the ORDER BY clause (e.g., if columns aren't unique enough) or if it's a large table.
+        processed_data.sort()
+        return processed_data
     except Exception as ex:
-        print(f"Error fetching data for {table_name} into DataFrames: {ex}")
-        results['overall_status'] = 'DATA_FETCH_ERROR'
-        results['detailed_differences'].append({
-            'Action': 'DATA FETCH ERROR',
-            'Column': 'N/A',
-            'Source_Value': f"Error: {ex}",
-            'Target_Value': f"Error: {ex}",
-            'Row_Identifier': 'N/A'
-        })
-        return results
+        print(f"ERROR: Failed to fetch data for {db_type} table '{table_name}': {ex}")
+        return None
 
-    # Clean dataframes for consistent comparison
-    syb_df_cleaned = clean_data_for_comparison(syb_df.copy())
-    sql_df_cleaned = clean_data_for_comparison(sql_df.copy())
-
-    # Get common columns AFTER cleaning (as cleaning might affect dtypes for select_dtypes)
-    # This also acts as a safeguard if schemas were considered "matching" but column casing differs.
-    common_columns_data = list(set(syb_df_cleaned.columns) & set(sql_df_cleaned.columns))
-    
-    if not common_columns_data:
-        print(f"Warning: No common data columns found between Sybase and SQL Server for table {table_name}. Cannot perform row-by-row comparison.")
-        results['overall_status'] = 'NO_COMMON_DATA_COLUMNS'
-        results['detailed_differences'].append({
-            'Action': 'NO_COMMON_DATA_COLUMNS',
-            'Column': 'N/A',
-            'Source_Value': 'N/A',
-            'Target_Value': 'N/A',
-            'Row_Identifier': 'N/A'
-        })
-        return results
-
-    syb_df_cleaned = syb_df_cleaned[common_columns_data]
-    sql_df_cleaned = sql_df_cleaned[common_columns_data]
-
-    # Determine final key columns for merging. If common_pk_columns exist and are in common_columns_data, use them.
-    # Otherwise, use ALL common_columns_data as the merge key.
-    key_columns = [col for col in common_pk_columns if col in common_columns_data]
-    if not key_columns:
-        key_columns = common_columns_data # Fallback to all common columns if no valid PKs
-
-    # Ensure key columns actually exist in both dataframes (after potential column trimming/selection)
-    if not all(col in syb_df_cleaned.columns for col in key_columns):
-        print(f"Error: Some identified key columns are not present in Sybase DataFrame after cleaning for {table_name}. "
-              f"Missing: {set(key_columns) - set(syb_df_cleaned.columns)}")
-        results['overall_status'] = 'KEY_COLUMN_MISSING'
-        return results
-    if not all(col in sql_df_cleaned.columns for col in key_columns):
-        print(f"Error: Some identified key columns are not present in SQL Server DataFrame after cleaning for {table_name}. "
-              f"Missing: {set(key_columns) - set(sql_df_cleaned.columns)}")
-        results['overall_status'] = 'KEY_COLUMN_MISSING'
-        return results
-    
-    # Outer merge to find all rows (present in source, target, or both)
-    # The 'indicator=True' adds a '_merge' column indicating where the row came from.
-    merged_df = pd.merge(syb_df_cleaned, sql_df_cleaned, on=key_columns, how='outer', indicator=True, suffixes=('_syb', '_sql'))
-
-    # --- Identify rows missing in target (present in source only) ---
-    missing_in_target = merged_df[merged_df['_merge'] == 'left_only'].copy()
-    results['rows_missing_in_target'] = len(missing_in_target)
-    if not missing_in_target.empty:
-        for idx, row in missing_in_target.iterrows():
-            pk_values = {col: str(row[col]) for col in key_columns} # Capture PKs as identifier
-            # Capture the full source row for detailed reporting
-            source_row_data = {c.replace('_syb', ''): str(row[c]) for c in row.index if c.endswith('_syb')}
-            results['detailed_differences'].append({
-                'Action': 'MISSING IN TARGET',
-                'Column': 'N/A', # Not a column-specific mismatch
-                'Source_Value': source_row_data,
-                'Target_Value': 'N/A', # Not present in target
-                'Row_Identifier': pk_values
-            })
-
-    # --- Identify rows added in target (present in target only) ---
-    added_in_target = merged_df[merged_df['_merge'] == 'right_only'].copy()
-    results['rows_added_in_target'] = len(added_in_target)
-    if not added_in_target.empty:
-        for idx, row in added_in_target.iterrows():
-            pk_values = {col: str(row[col]) for col in key_columns}
-            # Capture the full target row for detailed reporting
-            target_row_data = {c.replace('_sql', ''): str(row[c]) for c in row.index if c.endswith('_sql')}
-            results['detailed_differences'].append({
-                'Action': 'ADDED IN TARGET',
-                'Column': 'N/A',
-                'Source_Value': 'N/A', # Not present in source
-                'Target_Value': target_row_data,
-                'Row_Identifier': pk_values
-            })
-
-    # --- Identify value mismatches in common rows (present in both) ---
-    common_rows = merged_df[merged_df['_merge'] == 'both'].copy()
-    mismatches_found = 0
-    if not common_rows.empty:
-        # Columns to compare for value differences (exclude keys and the merge indicator)
-        data_columns_for_comparison = [col for col in common_columns_data if col not in key_columns]
-
-        for idx, row in common_rows.iterrows():
-            row_pk_values = {col: str(row[col]) for col in key_columns}
-            for col in data_columns_for_comparison:
-                syb_col_name = f"{col}_syb"
-                sql_col_name = f"{col}_sql"
-
-                syb_val = row[syb_col_name] if syb_col_name in row.index else None
-                sql_val = row[sql_col_name] if sql_col_name in row.index else None
-
-                # Cleaned values should already be string and trimmed from clean_data_for_comparison
-                # So direct comparison is appropriate here.
-                if syb_val != sql_val:
-                    mismatches_found += 1
-                    # Use json.dumps to handle complex types (e.g., lists, dicts if they somehow exist)
-                    # or special characters that might break Excel. Fallback to str().
-                    try:
-                        syb_val_str = json.dumps(syb_val)
-                    except TypeError:
-                        syb_val_str = str(syb_val)
-                    try:
-                        sql_val_str = json.dumps(sql_val)
-                    except TypeError:
-                        sql_val_str = str(sql_val)
-
-                    results['detailed_differences'].append({
-                        'Action': 'VALUE MISMATCH',
-                        'Column': col,
-                        'Source_Value': syb_val_str,
-                        'Target_Value': sql_val_str,
-                        'Row_Identifier': row_pk_values
-                    })
-    results['value_mismatches_count'] = mismatches_found
-
-    print(f"Comparison Summary for {table_name}:")
-    print(f"  Rows missing in target: {results['rows_missing_in_target']}")
-    print(f"  Rows added in target: {results['rows_added_in_target']}")
-    print(f"  Value mismatches: {results['value_mismatches_count']}")
-
-    # Determine overall status
-    if not results['schema_match'] or \
-       results['row_count_syb'] != results['row_count_sql'] or \
-       results['rows_missing_in_target'] > 0 or \
-       results['rows_added_in_target'] > 0 or \
-       results['value_mismatches_count'] > 0:
-        results['overall_status'] = 'MISMATCHED'
-    else:
-        results['overall_status'] = 'MATCHED'
-
-    return results
-
-def generate_excel_report(comparison_results, report_file):
+def write_to_excel(table_name, summary_results, schema_diffs, data_diffs, sybase_count, mssql_count):
     """
-    Generates an Excel report with a summary sheet and detailed sheets for mismatches.
-    Args:
-        comparison_results: List of dictionaries, each containing comparison results for a table.
-        report_file: Path to the output Excel file (e.g., 'database_comparison_report.xlsx').
+    Writes the comparison results to an Excel file.
     """
-    print(f"\nGenerating Excel report: {report_file}")
-    # Using openpyxl engine for writing Excel files.
-    writer = pd.ExcelWriter(report_file, engine='openpyxl')
+    filename = f"{table_name}.xlsx"
+    workbook = openpyxl.Workbook()
 
     # --- Summary Sheet ---
-    summary_data = []
-    for res in comparison_results:
-        summary_data.append({
-            'Table Name': res['table_name'],
-            'Schema Match': 'Yes' if res['schema_match'] else 'No',
-            'Source Row Count': res['row_count_syb'],
-            'Target Row Count': res['row_count_sql'],
-            'Rows Missing in Target': res['rows_missing_in_target'],
-            'Rows Added in Target': res['rows_added_in_target'],
-            'Value Mismatches': res['value_mismatches_count'],
-            'Overall Status': res['overall_status']
-        })
-    summary_df = pd.DataFrame(summary_data)
-    # Write the summary DataFrame to a sheet named 'Summary'. Do not include the DataFrame index.
-    summary_df.to_excel(writer, sheet_name='Summary', index=False)
+    summary_sheet = workbook.active
+    summary_sheet.title = "Summary"
+    summary_sheet['A1'] = "Comparison Summary"
+    summary_sheet['A1'].font = Font(bold=True, size=16)
+    summary_sheet['A3'] = "Table Name:"
+    summary_sheet['B3'] = table_name
+    summary_sheet['A4'] = "Record Counts Match:"
+    summary_sheet['B4'] = "YES" if summary_results['counts_match'] else "NO"
+    summary_sheet['A5'] = "Schemas (Columns & Types) Match:"
+    summary_sheet['B5'] = "YES" if summary_results['schemas_match'] else "NO"
+    summary_sheet['A6'] = "Data in Columns Match:"
+    summary_sheet['B6'] = "YES" if summary_results['data_matches'] else "NO"
 
-    # --- Detail Sheets for Mismatches ---
-    for res in comparison_results:
-        # Create a detail sheet only if there are recorded differences for the table.
-        if res['detailed_differences']:
-            detail_df = pd.DataFrame(res['detailed_differences'])
-            # Create a valid Excel sheet name (max 31 characters, no invalid chars like /, \, ?, *, [, ])
-            # We'll truncate and add a suffix if the table name is too long.
-            sheet_name = f"{res['table_name']}_Details"
-            if len(sheet_name) > 31:
-                # Truncate and ensure it's still unique enough.
-                sheet_name = sheet_name[:25] + "_Det" # e.g., "very_long_table_name_Det"
+    # Auto-width for Summary Sheet
+    for col in summary_sheet.columns:
+        max_length = 0
+        column = col[0].column_letter # Get the column name
+        for cell in col:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = (max_length + 2) * 1.2
+        summary_sheet.column_dimensions[column].width = adjusted_width
 
-            # Convert 'Row_Identifier' dictionary to a JSON string for display in Excel.
-            # This makes the PK values readable in the report.
-            if 'Row_Identifier' in detail_df.columns:
-                detail_df['Row_Identifier'] = detail_df['Row_Identifier'].apply(
-                    lambda x: json.dumps(x) if isinstance(x, dict) else str(x)
-                )
-            
-            # Convert Source_Value and Target_Value columns to string to handle various types gracefully in Excel.
-            for col_name in ['Source_Value', 'Target_Value']:
-                if col_name in detail_df.columns:
-                    detail_df[col_name] = detail_df[col_name].apply(lambda x: json.dumps(x) if isinstance(x, (dict, list)) else str(x))
+    # --- Record Count Sheet ---
+    rc_sheet = workbook.create_sheet("Record Count")
+    rc_sheet['A1'] = "Record Count Comparison"
+    rc_sheet['A1'].font = Font(bold=True, size=14)
+    rc_sheet['A3'] = "Database"
+    rc_sheet['B3'] = "Count"
+    rc_sheet['A3'].font = Font(bold=True)
+    rc_sheet['B3'].font = Font(bold=True)
+    rc_sheet['A4'] = "Sybase"
+    rc_sheet['B4'] = sybase_count
+    rc_sheet['A5'] = "MSSQL"
+    rc_sheet['B5'] = mssql_count
 
-            detail_df.to_excel(writer, sheet_name=sheet_name, index=False)
+    # Auto-width for Record Count Sheet
+    for col in rc_sheet.columns:
+        max_length = 0
+        column = col[0].column_letter
+        for cell in col:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = (max_length + 2) * 1.2
+        rc_sheet.column_dimensions[column].width = adjusted_width
 
-    # Save the Excel file. This commits all sheets to the file.
-    writer.close()
-    print(f"Excel report '{report_file}' generated successfully.")
+
+    # --- Schema Differences Sheet ---
+    schema_sheet = workbook.create_sheet("Schema Differences")
+    schema_sheet['A1'] = "Schema Comparison Details"
+    schema_sheet['A1'].font = Font(bold=True, size=14)
+    schema_sheet.append(["Status", "Column Name", "Sybase Type", "MSSQL Type"])
+    schema_sheet.cell(row=2, column=1).font = Font(bold=True)
+    schema_sheet.cell(row=2, column=2).font = Font(bold=True)
+    schema_sheet.cell(row=2, column=3).font = Font(bold=True)
+    schema_sheet.cell(row=2, column=4).font = Font(bold=True)
+
+
+    if not schema_diffs:
+        schema_sheet.append(["", "No schema discrepancies found."])
+    else:
+        for diff in schema_diffs:
+            schema_sheet.append([diff['status'], diff['column_name'], diff.get('sybase_type', ''), diff.get('mssql_type', '')])
+
+    # Auto-width for Schema Sheet
+    for col in schema_sheet.columns:
+        max_length = 0
+        column = col[0].column_letter
+        for cell in col:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = (max_length + 2) * 1.2
+        schema_sheet.column_dimensions[column].width = adjusted_width
+
+    # --- Data Discrepancies Sheet ---
+    data_sheet = workbook.create_sheet("Data Discrepancies")
+    data_sheet['A1'] = "Data Mismatch Details"
+    data_sheet['A1'].font = Font(bold=True, size=14)
+    data_sheet.append(["Row Index (Sorted)", "Column Index", "Sybase Value", "MSSQL Value"])
+    data_sheet.cell(row=2, column=1).font = Font(bold=True)
+    data_sheet.cell(row=2, column=2).font = Font(bold=True)
+    data_sheet.cell(row=2, column=3).font = Font(bold=True)
+    data_sheet.cell(row=2, column=4).font = Font(bold=True)
+
+    if not data_diffs:
+        data_sheet.append(["", "", "No data discrepancies found."])
+    else:
+        for diff in data_diffs:
+            data_sheet.append([diff['row_index'], diff['col_index'], diff['sybase_value'], diff['mssql_value']])
+
+    # Auto-width for Data Sheet
+    for col in data_sheet.columns:
+        max_length = 0
+        column = col[0].column_letter
+        for cell in col:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = (max_length + 2) * 1.2
+        data_sheet.column_dimensions[column].width = adjusted_width
+
+
+    try:
+        workbook.save(filename)
+        print(f"\nComparison report saved to '{filename}' successfully.")
+    except Exception as ex:
+        print(f"ERROR: Could not save Excel file '{filename}': {ex}")
 
 def main():
     """
-    Main function to orchestrate the database comparison process.
-    Establishes connections, finds common tables, compares them, and generates the report.
-    Ensures connections are closed in a finally block.
+    Main function to orchestrate the database comparison process and generate Excel report.
     """
-    syb_conn = None
-    sql_conn = None
-    all_comparison_results = []
+    if len(sys.argv) < 2:
+        print("Usage: python compare_db_data.py <table_name>")
+        sys.exit(1) # Exit if no table name is provided
 
-    try:
-        # Attempt to connect to both databases.
-        syb_conn = get_sybase_connection()
-        sql_conn = get_sqlserver_connection()
+    table_name = sys.argv[1]
 
-        # If either connection fails, print an error and exit.
-        if not syb_conn:
-            print("Failed to establish Sybase connection. Please check your connection details and ODBC driver setup. Exiting.")
-            return
-        if not sql_conn:
-            print("Failed to establish SQL Server connection. Please check your connection details. Exiting.")
-            return
+    # --- Sybase Connection Details (PLACEHOLDERS - REPLACE WITH YOUR ACTUAL DETAILS) ---
+    SYBASE_DSN = "YOUR_SYBASE_DSN"       # e.g., "Sybase_Prod_DB" - Must be configured on your OS
+    SYBASE_UID = "YOUR_SYBASE_USERNAME"
+    SYBASE_PWD = "YOUR_SYBASE_PASSWORD"
 
-        # Get lists of tables from both databases.
-        syb_tables = set(get_tables(syb_conn, 'sybase'))
-        sql_tables = set(get_tables(sql_conn, 'sqlserver'))
+    # --- MSSQL Connection Details (PLACEHOLDERS - REPLACE WITH YOUR ACTUAL DETAILS) ---
+    MSSQL_SERVER = "YOUR_MSSQL_SERVER_IP_OR_HOSTNAME" # e.g., "localhost", "192.168.1.10", or "your_server_name\SQLEXPRESS"
+    MSSQL_DATABASE = "YOUR_MSSQL_DATABASE" # e.g., "SalesDB"
+    MSSQL_USER = "YOUR_MSSQL_USERNAME"
+    MSSQL_PASSWORD = "YOUR_MSSQL_PASSWORD"
 
-        # Find tables common to both source and target.
-        common_tables = sorted(list(syb_tables.intersection(sql_tables)))
+    # --- Establish Database Connections ---
+    sybase_conn = get_sybase_connection(SYBASE_DSN, SYBASE_UID, SYBASE_PWD)
+    mssql_conn = get_mssql_connection(MSSQL_SERVER, MSSQL_USER, MSSQL_PASSWORD, MSSQL_DATABASE)
 
-        if not common_tables:
-            print("No common tables found between Sybase and SQL Server based on provided database names. Please ensure tables exist and are accessible.")
-            return
+    sybase_cursor = sybase_conn.cursor()
+    mssql_cursor = mssql_conn.cursor()
 
-        print(f"\nFound {len(common_tables)} common tables for comparison: {', '.join(common_tables)}")
+    print(f"\n--- Starting Comparison for Table: '{table_name}' ---")
 
-        # Iterate through common tables and perform comparison.
-        for table_name in common_tables:
-            results = compare_tables(syb_conn, sql_conn, table_name)
-            all_comparison_results.append(results)
+    # Initialize results containers
+    summary_results = {
+        'counts_match': False,
+        'schemas_match': False,
+        'data_matches': False
+    }
+    schema_diffs = []
+    data_diffs = []
+    sybase_count = -1
+    mssql_count = -1
 
-    except Exception as e:
-        print(f"An unhandled error occurred during the comparison process: {e}")
-    finally:
-        # Ensure database connections are closed, even if errors occur.
-        if syb_conn:
-            try:
-                syb_conn.close()
-                print("Sybase connection closed.")
-            except Exception as e:
-                print(f"Error closing Sybase connection: {e}")
-        if sql_conn:
-            try:
-                sql_conn.close()
-                print("SQL Server connection closed.")
-            except Exception as e:
-                print(f"Error closing SQL Server connection: {e}")
-
-    # Generate the Excel report if there are any comparison results.
-    if all_comparison_results:
-        generate_excel_report(all_comparison_results, REPORT_FILE)
+    # --- 1. Compare Record Counts ---
+    sybase_count = get_record_count(sybase_cursor, table_name)
+    mssql_count = get_record_count(mssql_cursor, table_name)
+    if sybase_count != -1 and mssql_count != -1:
+        summary_results['counts_match'] = (sybase_count == mssql_count)
+        print(f"Record Counts: Sybase={sybase_count}, MSSQL={mssql_count}. Match: {summary_results['counts_match']}")
     else:
-        print("No comparison results were generated. Report will not be created.")
+        print("Could not retrieve one or both record counts due to prior errors.")
+
+    # --- 2. Compare Schemas (Column Names and Data Types) ---
+    sybase_schema = get_table_schema(sybase_cursor, 'sybase', table_name)
+    mssql_schema = get_table_schema(mssql_cursor, 'mssql', table_name)
+
+    if sybase_schema is not None and mssql_schema is not None:
+        sybase_cols = {col['name'].lower(): col['type'].lower() for col in sybase_schema}
+        mssql_cols = {col['name'].lower(): col['type'].lower() for col in mssql_schema}
+        all_col_names = sorted(list(set(sybase_cols.keys()).union(mssql_cols.keys())))
+
+        current_schemas_match = True
+        for col_name in all_col_names:
+            sybase_type = sybase_cols.get(col_name)
+            mssql_type = mssql_cols.get(col_name)
+
+            if sybase_type is None:
+                schema_diffs.append({
+                    'status': 'MSSQL_ONLY',
+                    'column_name': col_name,
+                    'mssql_type': mssql_type
+                })
+                current_schemas_match = False
+            elif mssql_type is None:
+                schema_diffs.append({
+                    'status': 'SYBASE_ONLY',
+                    'column_name': col_name,
+                    'sybase_type': sybase_type
+                })
+                current_schemas_match = False
+            elif sybase_type != mssql_type:
+                schema_diffs.append({
+                    'status': 'TYPE_MISMATCH',
+                    'column_name': col_name,
+                    'sybase_type': sybase_type,
+                    'mssql_type': mssql_type
+                })
+                current_schemas_match = False
+        summary_results['schemas_match'] = current_schemas_match
+        print(f"Schemas (Columns & Types) Match: {summary_results['schemas_match']}")
+    else:
+        print("Skipping schema comparison due to errors in fetching one or both schemas.")
+
+
+    # --- 3. Compare Data in Each Column ---
+    # Only proceed with detailed data comparison if counts and schemas appear consistent
+    if summary_results['counts_match'] and summary_results['schemas_match']:
+        print("\nFetching all data for detailed column-by-column comparison. This might take significant time for large tables...")
+        sybase_data = get_table_data(sybase_cursor, table_name, 'sybase', sybase_schema)
+        mssql_data = get_table_data(mssql_cursor, table_name, 'mssql', mssql_schema)
+
+        if sybase_data is not None and mssql_data is not None:
+            current_data_matches = True
+            if len(sybase_data) != len(mssql_data):
+                print(f"WARNING: Data comparison skipped. Record counts differ (Sybase: {len(sybase_data)}, MSSQL: {len(mssql_data)}).")
+                current_data_matches = False # Even if fetching succeeded, counts mismatch means data doesn't match
+            elif not sybase_data: # Both are empty if they match here and sybase_data is empty
+                print("Both tables are empty. Data comparison considered a match.")
+            else:
+                num_columns = len(sybase_data[0])
+                for i in range(len(sybase_data)):
+                    sybase_row = sybase_data[i]
+                    mssql_row = mssql_data[i]
+                    if sybase_row != mssql_row:
+                        current_data_matches = False
+                        for j in range(num_columns):
+                            sybase_val = sybase_row[j]
+                            mssql_val = mssql_row[j]
+                            if sybase_val != mssql_val:
+                                data_diffs.append({
+                                    'row_index': i + 1,
+                                    'col_index': j + 1,
+                                    'sybase_value': str(sybase_val), # Convert to string for Excel
+                                    'mssql_value': str(mssql_val)
+                                })
+            summary_results['data_matches'] = current_data_matches
+            print(f"Data in Columns Match: {summary_results['data_matches']}")
+        else:
+            print("Skipping detailed data comparison due to errors in fetching one or both datasets.")
+    else:
+        print("Skipping detailed data comparison because record counts or schemas did not match.")
+
+    # --- Generate Excel Report ---
+    write_to_excel(table_name, summary_results, schema_diffs, data_diffs, sybase_count, mssql_count)
+
+    # --- Close Database Connections ---
+    sybase_cursor.close()
+    sybase_conn.close()
+    mssql_cursor.close()
+    mssql_conn.close()
+    print("\nDatabase connections closed.")
 
 if __name__ == "__main__":
     main()
-
