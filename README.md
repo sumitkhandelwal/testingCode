@@ -1,322 +1,284 @@
-def main():
+/* General Body Styling - Appian Style */
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    margin: 0;
+    background-color: #f7f7f7; /* Light gray background */
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    color: #333;
+}
 
-    """
+/* Header Styling */
+.header {
+    display: flex;
+    align-items: center;
+    padding: 12px 30px;
+    background-color: #ffffff;
+    border-bottom: 1px solid #e0e0e0;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
 
-    Main function to orchestrate the database comparison process and generate Excel report.
+.logo {
+    width: 40px;
+    height: 40px;
+    margin-right: 15px;
+}
 
-    """
+.header-text {
+    color: #2d2d2d;
+    font-size: 1.1em;
+    font-weight: 600;
+}
 
-    if len(sys.argv) < 2:
+/* Main Login Container */
+.login-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-grow: 1;
+    padding: 20px;
+}
 
-        print("Usage: python compare_db_data.py <table_name>")
+.login-form {
+    background-color: #ffffff;
+    padding: 40px;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    width: 100%;
+    max-width: 400px;
+    text-align: center;
+    border-top: 4px solid #005a9c; /* Appian-like blue accent */
+}
 
-        sys.exit(1) # Exit if no table name is provided
+.login-form h2 {
+    margin-bottom: 25px;
+    color: #333;
+    font-weight: 600;
+}
 
+/* Form Group Styling */
+.form-group {
+    margin-bottom: 20px;
+    text-align: left;
+}
 
+.form-group label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 600;
+    color: #555;
+    font-size: 0.9em;
+}
 
-    table_name = sys.argv[1]
+.form-group input {
+    width: 100%;
+    padding: 12px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    box-sizing: border-box;
+    transition: border-color 0.3s, box-shadow 0.3s;
+}
 
+.form-group input:focus {
+    outline: none;
+    border-color: #005a9c;
+    box-shadow: 0 0 0 2px rgba(0, 90, 156, 0.2);
+}
 
+/* Button Styling */
+.login-btn {
+    width: 100%;
+    padding: 12px;
+    border: none;
+    border-radius: 4px;
+    background-color: #005a9c; /* Primary Appian blue */
+    color: white;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.3s;
+}
 
-    # --- Sybase Connection Details (PLACEHOLDERS - REPLACE WITH YOUR ACTUAL DETAILS) ---
+.login-btn:hover {
+    background-color: #004b80; /* Darker blue on hover */
+}
 
-    SYBASE_DSN = "YOUR_SYBASE_DSN"       # e.g., "Sybase_Prod_DB" - Must be configured on your OS
+/* Links */
+.links {
+    margin-top: 20px;
+    font-size: 0.9em;
+}
 
-    SYBASE_UID = "YOUR_SYBASE_USERNAME"
+.links a {
+    color: #005a9c;
+    text-decoration: none;
+}
 
-    SYBASE_PWD = "YOUR_SYBASE_PASSWORD"
+.links a:hover {
+    text-decoration: underline;
+}
 
-
-
-    # --- MSSQL Connection Details (PLACEHOLDERS - REPLACE WITH YOUR ACTUAL DETAILS) ---
-
-    MSSQL_SERVER = "YOUR_MSSQL_SERVER_IP_OR_HOSTNAME" # e.g., "localhost", "192.168.1.10", or "your_server_name\SQLEXPRESS"
-
-    MSSQL_DATABASE = "YOUR_MSSQL_DATABASE" # e.g., "SalesDB"
-
-    MSSQL_USER = "YOUR_MSSQL_USERNAME"
-
-    MSSQL_PASSWORD = "YOUR_MSSQL_PASSWORD"
-
-
-
-    # --- Establish Database Connections ---
-
-    sybase_conn = get_sybase_connection(SYBASE_DSN, SYBASE_UID, SYBASE_PWD)
-
-    mssql_conn = get_mssql_connection(MSSQL_SERVER, MSSQL_USER, MSSQL_PASSWORD, MSSQL_DATABASE)
-
-
-
-    sybase_cursor = sybase_conn.cursor()
-
-    mssql_cursor = mssql_conn.cursor()
-
-
-
-    print(f"\n--- Starting Comparison for Table: '{table_name}' ---")
-
-
-
-    # Initialize results containers
-
-    summary_results = {
-
-        'counts_match': False,
-
-        'schemas_match': False,
-
-        'data_matches': False
-
+/* Responsive Design */
+@media (max-width: 480px) {
+    .login-form {
+        padding: 25px;
+        border-top-width: 3px;
     }
-
-    schema_diffs = []
-
-    data_diffs = []
-
-    sybase_count = -1
-
-    mssql_count = -1
-
-
-
-    # --- 1. Compare Record Counts ---
-
-    sybase_count = get_record_count(sybase_cursor, table_name)
-
-    mssql_count = get_record_count(mssql_cursor, table_name)
-
-    if sybase_count != -1 and mssql_count != -1:
-
-        summary_results['counts_match'] = (sybase_count == mssql_count)
-
-        print(f"Record Counts: Sybase={sybase_count}, MSSQL={mssql_count}. Match: {summary_results['counts_match']}")
-
-    else:
-
-        print("Could not retrieve one or both record counts due to prior errors.")
-
-
-
-    # --- 2. Compare Schemas (Column Names and Data Types) ---
-
-    sybase_schema = get_table_schema(sybase_cursor, 'sybase', table_name)
-
-    mssql_schema = get_table_schema(mssql_cursor, 'mssql', table_name)
-
-
-
-    if sybase_schema is not None and mssql_schema is not None:
-
-        sybase_cols = {col['name'].lower(): col['type'].lower() for col in sybase_schema}
-
-        mssql_cols = {col['name'].lower(): col['type'].lower() for col in mssql_schema}
-
-        all_col_names = sorted(list(set(sybase_cols.keys()).union(mssql_cols.keys())))
-
-
-
-        current_schemas_match = True
-
-        for col_name in all_col_names:
-
-            sybase_type = sybase_cols.get(col_name)
-
-            mssql_type = mssql_cols.get(col_name)
-
-
-
-            if sybase_type is None:
-
-                schema_diffs.append({
-
-                    'status': 'MSSQL_ONLY',
-
-                    'column_name': col_name,
-
-                    'mssql_type': mssql_type
-
-                })
-
-                current_schemas_match = False
-
-            elif mssql_type is None:
-
-                schema_diffs.append({
-
-                    'status': 'SYBASE_ONLY',
-
-                    'column_name': col_name,
-
-                    'sybase_type': sybase_type
-
-                })
-
-                current_schemas_match = False
-
-            elif sybase_type != mssql_type:
-
-                schema_diffs.append({
-
-                    'status': 'TYPE_MISMATCH',
-
-                    'column_name': col_name,
-
-                    'sybase_type': sybase_type,
-
-                    'mssql_type': mssql_type
-
-                })
-
-                current_schemas_match = False
-
-        summary_results['schemas_match'] = current_schemas_match
-
-        print(f"Schemas (Columns & Types) Match: {summary_results['schemas_match']}")
-
-    else:
-
-        print("Skipping schema comparison due to errors in fetching one or both schemas.")
-
-
-
-
-
-    # --- 3. Compare Data in Each Column (Value-by-Value) ---
-
-    # Fetch data here so it can be passed to both data comparison sheets
-
-    sybase_data = None
-
-    mssql_data = None
-
-    if summary_results['counts_match'] and summary_results['schemas_match']:
-
-        print("\nFetching all data for detailed column-by-column comparison. This might take significant time for large tables...")
-
-        sybase_data = get_table_data(sybase_cursor, table_name, 'sybase', sybase_schema)
-
-        mssql_data = get_table_data(mssql_cursor, table_name, 'mssql', mssql_schema)
-
-
-
-        if sybase_data is not None and mssql_data is not None:
-
-            current_data_matches = True
-
-            if len(sybase_data) != len(mssql_data):
-
-                print(f"WARNING: Data comparison skipped. Record counts differ (Sybase: {len(sybase_data)}, MSSQL: {len(mssql_data)}).")
-
-                current_data_matches = False # Even if fetching succeeded, counts mismatch means data doesn't match
-
-            elif not sybase_data: # Both are empty if they match here and sybase_data is empty
-
-                print("Both tables are empty. Data comparison considered a match.")
-
-            else:
-
-                num_columns = len(sybase_data[0])
-
-                for i in range(len(sybase_data)):
-
-                    sybase_row = sybase_data[i]
-
-                    mssql_row = mssql_data[i]
-
-                    if sybase_row != mssql_row:
-
-                        current_data_matches = False
-
-                        for j in range(num_columns):
-
-                            sybase_val = sybase_row[j]
-
-                            mssql_val = mssql_row[j]
-
-                            if sybase_val != mssql_val:
-
-                                data_diffs.append({
-
-                                    'row_index': i + 1,
-
-                                    'col_index': j + 1,
-
-                                    'sybase_value': str(sybase_val), # Convert to string for Excel
-
-                                    'mssql_value': str(mssql_val)
-
-                                })
-
-            summary_results['data_matches'] = current_data_matches
-
-            print(f"Data in Columns Match: {summary_results['data_matches']}")
-
+    .header {
+        padding: 10px 15px;
+    }
+    .logo {
+        width: 35px;
+        height: 35px;
+    }
+    .header-text {
+        font-size: 1em;
+    }
+}
+
+
+
+
+// You can add form validation or other interactions here later.
+document.addEventListener('DOMContentLoaded', (event) => {
+    console.log('Login page is loaded and script is running!');
+});
+
+
+
+from django.shortcuts import render, redirect
+from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.decorators import login_required
+from django.contrib import messages
+
+def login_view(request):
+    """Handles user login."""
+    if request.user.is_authenticated:
+        return redirect('dashboard')
+
+    if request.method == 'POST':
+        username = request.POST.get('username')
+        password = request.POST.get('password')
+        user = authenticate(request, username=username, password=password)
+        
+        if user is not None:
+            login(request, user)
+            return redirect('dashboard')
         else:
+            messages.error(request, 'Invalid username or password.')
+            return redirect('login')
+            
+    return render(request, 'myapp/login.html')
 
-            print("Skipping detailed data comparison due to errors in fetching one or both datasets.")
+@login_required
+def dashboard_view(request):
+    """Displays the user's dashboard."""
+    return render(request, 'myapp/dashboard.html')
 
-    else:
-
-        print("Skipping detailed data comparison because record counts or schemas did not match.")
-
-
-
-    # --- Generate Excel Report ---
-
-    filename = f"{table_name}.xlsx"
-
-    workbook = openpyxl.Workbook()
-
-
-
-    write_summary_and_schema_to_excel(workbook, table_name, summary_results, schema_diffs, sybase_count, mssql_count)
-
-    write_data_discrepancies_sheet(workbook, data_diffs)
-
-    
-
-    # Only call full data comparison if data was successfully retrieved
-
-    if sybase_data is not None and mssql_data is not None:
-
-        write_full_data_comparison_sheet(workbook, table_name, sybase_data, mssql_data, sybase_schema)
-
-    else:
-
-        print("Skipping full data comparison sheet generation as data could not be retrieved.")
-
-
-
-    try:
-
-        workbook.save(filename)
-
-        print(f"\nComparison report saved to '{filename}' successfully.")
-
-    except Exception as ex:
-
-        print(f"ERROR: Could not save Excel file '{filename}': {ex}")
+def logout_view(request):
+    """Logs the user out."""
+    logout(request)
+    return redirect('login')
 
 
 
 
 
-    # --- Close Database Connections ---
+from django.urls import path
+from . import views
 
-    sybase_cursor.close()
-
-    sybase_conn.close()
-
-    mssql_cursor.close()
-
-    mssql_conn.close()
-
-    print("\nDatabase connections closed.")
+urlpatterns = [
+    path('', views.login_view, name='login'),
+    path('dashboard/', views.dashboard_view, name='dashboard'),
+    path('logout/', views.logout_view, name='logout'),
+]
 
 
 
-if __name__ == "__main__":
+from django.apps import AppConfig
 
-    main()
 
+class CoreappConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'myapp'
+
+
+
+
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - My Sample Website</title>
+    <link rel="stylesheet" href="{% static 'css/style.css' %}">
+</head>
+<body>
+
+    <header class="header">
+        <img src="https://placehold.co/600x600/005a9c/ffffff?text=Logo" alt="Logo" class="logo">
+        <span class="header-text">This is my sample Website</span>
+    </header>
+
+    <main class="login-container">
+        <div class="login-form">
+            <h2>Member Login</h2>
+            
+            {% if messages %}
+                <div class="messages" style="margin-bottom: 15px;">
+                    {% for message in messages %}
+                        <p style="color: #d93025; font-size: 0.9em; background-color: #fce8e6; padding: 10px; border-radius: 4px;">{{ message }}</p>
+                    {% endfor %}
+                </div>
+            {% endif %}
+
+            <form action="{% url 'login' %}" method="POST">
+                {% csrf_token %}
+                <div class="form-group">
+                    <label for="username">Username</label>
+                    <input type="text" id="username" name="username" required>
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" required>
+                </div>
+                <button type="submit" class="login-btn">Login</button>
+            </form>
+            <div class="links">
+                <a href="#">Forgot Password?</a>
+            </div>
+        </div>
+    </main>
+
+    <script src="{% static 'js/script.js' %}"></script>
+</body>
+</html>
+
+
+
+
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard</title>
+    <link rel="stylesheet" href="{% static 'css/style.css' %}">
+</head>
+<body>
+    <header class="header">
+        <img src="https://placehold.co/600x600/005a9c/ffffff?text=Logo" alt="Logo" class="logo">
+        <span class="header-text">This is my sample Website</span>
+    </header>
+    <main class="login-container">
+        <div class="login-form">
+            <h2>Welcome, {{ user.username }}!</h2>
+            <p>You have successfully logged in to the dashboard.</p>
+            <a href="{% url 'logout' %}" class="login-btn" style="text-decoration: none; display: block; margin-top: 20px; text-align: center;">Logout</a>
+        </div>
+    </main>
+</body>
+</html>
